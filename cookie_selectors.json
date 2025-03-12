@@ -1,8 +1,10 @@
 {
-  "barclays.co.uk": {
-    "bannerSelector": "#cookieBannerContainer"
-  },
-  "nationwide.co.uk": {
-    "bannerSelector": "#cookieBannerContainer",
-    "rejectSelector": "#onetrust-reject-all-handler"
+  "www.barclays.co.uk": {
+    "clickSelector": null,
+    "shadowSelectors": [
+      "#__tealiumGDPRecModal > tealium-consent",
+      "tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)",
+      "button"
+    ]
   }
+}
