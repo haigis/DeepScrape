@@ -56,6 +56,7 @@ node deepscrape.cjs
 ```
 
 This will:
+
 ✅ Create a new folder in `output/` (e.g., `output/scan_YYYYMMDD_HHMMSS_<scanID>/`).  
 ✅ Save HTML files in `html/`.  
 ✅ Extract image URLs into `images.txt`.
@@ -105,6 +106,7 @@ node deepscrape.cjs --pdf -n pdfscan
 ```
 
 This will:
+
 ✅ Load each page in **Puppeteer**  
 ✅ Save it as a **PDF** inside the `pdf/` folder
 
