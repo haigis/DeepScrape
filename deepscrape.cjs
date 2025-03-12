@@ -5,6 +5,17 @@ const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
 const sharp = require('sharp');
 const { URL } = require('url');
+const cliProgress = require('cli-progress');
+
+// Load cookie banner configurations from cookie_selectors.json
+let cookieConfigs = {};
+try {
+    const configData = fs.readFileSync('cookie_selectors.json', 'utf8');
+    cookieConfigs = JSON.parse(configData);
+    console.log("✅ Loaded cookie_selectors.json configuration.");
+} catch (e) {
+    console.error("❌ Could not load cookie_selectors.json:", e.message);
+}
 
 // ✅ Display Help
 function displayHelp() {
@@ -98,12 +109,24 @@ function ensureDir(base, sub) {
     return out;
 }
 
-// ✅ Convert domain+path => folder
-function sanitizeUrlToFolderName(url) {
-    return url
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_|_$/g, '');
+// ✅ Sanitize a segment for use as a folder or file name.
+// This version allows letters, numbers, dots and hyphens.
+function sanitizeSegment(segment) {
+    return segment.replace(/[^a-zA-Z0-9.-]/g, '_');
+}
+
+// ✅ Build folder path based on URL taxonomy (split only on "/")
+// The domain is used as is, and each path segment is sanitized.
+function buildFolderPath(url) {
+    const parsed = new URL(url);
+    const domainFolder = parsed.hostname; // e.g., "www.barclays.co.uk"
+    const pathSegments = parsed.pathname.split('/')
+                           .filter(seg => seg.trim().length > 0)
+                           .map(seg => sanitizeSegment(seg));
+    if (pathSegments.length === 0) {
+        return domainFolder;
+    }
+    return path.join(domainFolder, ...pathSegments);
 }
 
 // ✅ Download images
@@ -116,7 +139,6 @@ async function downloadImages(images, destDir, rate) {
             const filePath = path.join(destDir, filename);
             resp.data.pipe(fs.createWriteStream(filePath));
             console.log(`✅ Image saved: ${filePath}`);
-
             if (rate > 0) {
                 await new Promise(r => setTimeout(r, rate));
             }
@@ -126,42 +148,42 @@ async function downloadImages(images, destDir, rate) {
     }
 }
 
-// ✅ Function to click "Reject optional cookies" in a Shadow DOM
-async function clickRejectOptionalCookiesShadowDom(page) {
-    console.log('🔍 Attempting to click "Reject optional cookies" in Shadow DOM...');
-    try {
-        // Quickly check if the consent element exists instead of waiting 5s.
-        const consentElement = await page.$('#__tealiumGDPRecModal > tealium-consent');
-        if (!consentElement) {
-            console.log('ℹ️ Cookie consent banner not found, skipping.');
-            return;
+// ✅ Handle cookie banner using configuration from cookie_selectors.json.
+// It checks the current domain (or a domain ending) and, if found in cookieConfigs,
+// clicks the element using the provided rejectSelector.
+async function handleCookieBanner(page) {
+    const currentUrl = page.url();
+    const currentDomain = new URL(currentUrl).hostname;
+    let configKey = null;
+    for (const key in cookieConfigs) {
+        if (currentDomain.endsWith(key)) {
+            configKey = key;
+            break;
         }
-
-        // Evaluate in the browser context
+    }
+    if (configKey && cookieConfigs[configKey].rejectSelector) {
+        await page.evaluate((selector) => {
+            const btn = document.querySelector(selector);
+            if (btn) {
+                btn.click();
+            }
+        }, cookieConfigs[configKey].rejectSelector);
+        await new Promise(r => setTimeout(r, 2000));
+    } else {
+        // Fallback behavior.
         await page.evaluate(() => {
             const host = document.querySelector('#__tealiumGDPRecModal > tealium-consent');
-            if (!host || !host.shadowRoot) {
-                console.warn('⚠️ Shadow host or root not found');
-                return;
+            if (host && host.shadowRoot) {
+                const banner = host.shadowRoot.querySelector('tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)');
+                if (banner && banner.shadowRoot) {
+                    const realBtn = banner.shadowRoot.querySelector('button');
+                    if (realBtn) {
+                        realBtn.click();
+                    }
+                }
             }
-            const banner = host.shadowRoot.querySelector('tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)');
-            if (!banner || !banner.shadowRoot) {
-                console.warn('⚠️ tealium-button not found in second child');
-                return;
-            }
-            const realBtn = banner.shadowRoot.querySelector('button');
-            if (!realBtn) {
-                console.warn('⚠️ No final <button> inside tealium-button');
-                return;
-            }
-            realBtn.click();
-            console.log('✅ Clicked "Reject optional cookies" in shadow DOM');
         });
-
-        // Short wait after clicking using custom delay
         await new Promise(r => setTimeout(r, 2000));
-    } catch (err) {
-        console.warn(`⚠️ Error handling cookie banner => ${err.message}`);
     }
 }
 
@@ -188,13 +210,10 @@ async function autoScroll(page) {
 async function captureWebpScreenshot(page, outPath) {
     console.log(`📸 Capturing screenshot => ${outPath}`);
     try {
-        // 1) capture PNG in memory
         const pngBuf = await page.screenshot({
             fullPage: true,
             type: 'png'
         });
-
-        // 2) convert PNG => WEBP with "sharp"
         await sharp(pngBuf).webp({ quality: 90 }).toFile(outPath);
         console.log(`✅ Screenshot saved as .webp => ${outPath}`);
     } catch (err) {
@@ -202,87 +221,71 @@ async function captureWebpScreenshot(page, outPath) {
     }
 }
 
-// ✅ Process URLs
-// ✅ Process URLs
+// ✅ Process URLs with Folder Taxonomy Matching the Site
 async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
-    // Launch headless, 1440x900
+    const totalUrls = urls.length;
+    const progressBar = new cliProgress.SingleBar({
+        format: 'Processing [{bar}] {percentage}% | {value}/{total} URLs | ETA: {eta_formatted} | Completion: {completion_time}',
+        hideCursor: true
+    }, cliProgress.Presets.shades_classic);
+    const startTime = Date.now();
+    progressBar.start(totalUrls, 0, { completion_time: 'N/A' });
+
     const browser = await puppeteer.launch({
         headless: true,
         defaultViewport: { width: 1440, height: 900 },
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
-    for (const url of urls) {
+    for (let i = 0; i < totalUrls; i++) {
+        const url = urls[i];
         console.log(`🌍 Fetching HTML for: ${url}`);
         try {
-            // Get raw HTML
             const resp = await axios.get(url);
             const html = resp.data;
 
-            const parsed = new URL(url);
-            const domainPath = parsed.hostname + parsed.pathname;
-            const folderName = sanitizeUrlToFolderName(domainPath) || 'root';
+            // Build taxonomy-based folder path (split only on "/")
+            const relativeFolderPath = buildFolderPath(url);
+            const pageDir = ensureDir(outDir, relativeFolderPath);
+            // Use the last segment of the folder path as the base file name.
+            const baseName = path.basename(pageDir);
 
-            const htmlDir = ensureDir(outDir, `html/${folderName}`);
-            const imagesDir = ensureDir(outDir, `images/${folderName}`);
-            const screenshotDir = ensureDir(outDir, `screenshots/${folderName}`);
-
-            // Save the HTML
-            const htmlFile = path.join(htmlDir, 'index.html');
+            // Save HTML file as <baseName>.html inside pageDir.
+            const htmlFile = path.join(pageDir, `${baseName}.html`);
             fs.writeFileSync(htmlFile, `<!-- ${url} -->\n${html}`, 'utf8');
             console.log(`✅ Saved HTML: ${htmlFile}`);
 
-            // Extract images
+            // Create images subfolder.
+            const imagesDir = ensureDir(pageDir, 'images');
             const $ = cheerio.load(html);
             const imgs = [];
             $('img[src]').each((_, el) => {
                 const src = $(el).attr('src');
                 if (src) imgs.push(new URL(src, url).href);
             });
-
             if (imgs.length > 0) {
                 const imagesTxt = path.join(imagesDir, 'images.txt');
                 fs.writeFileSync(imagesTxt, imgs.join('\n'), 'utf8');
                 console.log(`✅ Saved image URLs: ${imagesTxt}`);
-
                 if (!skipImages) {
                     await downloadImages(imgs, imagesDir, rate);
                 }
             }
 
-            // If user specified -ss (screenshots)
+            // If screenshots are requested, capture and save the screenshot as <baseName>.webp in pageDir.
             if (screenshotFlag) {
                 console.log(`📸 Screenshot capturing: ${url}`);
-
                 const page = await browser.newPage();
-
-                // Confirm the viewport
                 await page.setViewport({ width: 1440, height: 900 });
-
                 await page.goto(url, { waitUntil: 'networkidle0' });
-
-                // Attempt to click "Reject optional cookies"
-                await clickRejectOptionalCookiesShadowDom(page);
-
-                // Short wait after clicking cookie banner using custom delay
+                await handleCookieBanner(page);
                 await new Promise(r => setTimeout(r, 2000));
-
-                // Auto-scroll to trigger lazy-loaded images
                 await autoScroll(page);
-                // Extra wait to ensure images have loaded
                 await new Promise(r => setTimeout(r, 2000));
-
-                // Scroll back to the top so table headers and navs reset
                 await page.evaluate(() => window.scrollTo(0, 0));
-                // Wait an extra second for sticky elements to adjust
                 await new Promise(r => setTimeout(r, 1000));
-
-                const webpFile = path.join(screenshotDir, 'index.webp');
-                await captureWebpScreenshot(page, webpFile);
-
+                const screenshotFile = path.join(pageDir, `${baseName}.webp`);
+                await captureWebpScreenshot(page, screenshotFile);
                 await page.close();
             }
 
@@ -292,37 +295,37 @@ async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
         } catch (err) {
             console.error(`❌ Error for: ${url} => ${err.message}`);
         }
-    }
 
+        // Update progress bar with estimated completion time.
+        const processed = i + 1;
+        const elapsed = Date.now() - startTime;
+        const avgTime = elapsed / processed;
+        const remaining = totalUrls - processed;
+        const estimatedRemaining = avgTime * remaining;
+        const finishTime = new Date(Date.now() + estimatedRemaining).toLocaleTimeString();
+        progressBar.increment(1, { completion_time: finishTime });
+    }
+    progressBar.stop();
     console.log("🛑 Closing Puppeteer.");
     await browser.close();
 }
 
-
-
 // ✅ Main
 async function main() {
     const args = process.argv.slice(2);
-
     if (args.includes('-h') || args.includes('--help')) {
         displayHelp();
     }
-
-    const screenshotFlag = args.includes('-ss'); // e.g. "node deepscrape.cjs -ss"
+    const screenshotFlag = args.includes('-ss');
     const skipImages = args.includes('--no-images');
-
     const rateIndex = args.indexOf('--rate-limit');
     const rate = rateIndex !== -1 ? parseInt(args[rateIndex + 1], 10) : 1000;
-
     const nIndex = args.indexOf('-n');
     const scanName = nIndex !== -1 ? args[nIndex + 1] : '';
-
     const outDir = generateUniqueOutputDir('./output', scanName);
     console.log(`📂 Using output directory: ${outDir}`);
 
     let allUrls = [];
-
-    // Check if -sm flag is provided for sitemap URL
     if (args.includes('-sm')) {
         const smIndex = args.indexOf('-sm');
         const sitemapUrl = args[smIndex + 1];
@@ -335,8 +338,6 @@ async function main() {
             console.error(`❌ Sitemap at ${sitemapUrl} returned no URLs.`);
             process.exit(1);
         }
-
-        // Check for ignore flag (-ign) when using sitemap
         let ignoreList = [];
         if (args.includes('-ign')) {
             const ignIndex = args.indexOf('-ign');
@@ -351,16 +352,13 @@ async function main() {
             console.log(`ℹ️ Filtered URLs using ignore list. ${initialCount} => ${allUrls.length} remaining.`);
         }
     } else {
-        // Read URLs from file
         allUrls = readUrlsFromFile('urls.txt');
         if (!allUrls.length) {
             console.error("❌ 'urls.txt' is empty or missing.");
             process.exit(1);
         }
     }
-
     await processUrls(allUrls, outDir, rate, screenshotFlag, skipImages);
-
     console.log("✅ Program completed.");
     process.exit(0);
 }
