@@ -9,7 +9,7 @@ const { URL } = require('url');
 // ✅ Display Help
 function displayHelp() {
     console.log(`
-DeepScrape - Version 7 (Cookie Banner + WEBP Screenshot)
+DeepScrape - Version 7 (Cookie Banner + WEBP Screenshot + Sitemap Support)
 
 Usage:
   node deepscrape.cjs [options]
@@ -21,6 +21,9 @@ Options:
   -n <name>            (Optional) Name for the scan folder.
   -ss                  Save a full-page WEBP screenshot for each URL.
                        (at 1440x900 in headless mode)
+  -sm <sitemap_url>    Use the provided sitemap URL to read URLs instead of urls.txt
+  -ign <ignore_urls>   (Optional) Comma-separated list of URL prefixes to ignore 
+                       (child pages will also be ignored)
 
 Examples:
 1) Minimal scan:
@@ -31,11 +34,13 @@ Examples:
    node deepscrape.cjs -ss --no-images -n NoImages
 4) Rate limit 3s:
    node deepscrape.cjs --rate-limit 3000 -ss
+5) Scan using sitemap and ignore certain URLs:
+   node deepscrape.cjs -sm https://example.com/sitemap.xml -ign "https://www.barclays.co.uk/branch-finder/,https://www.barclays.co.uk/contact-us/"
 `);
     process.exit(0);
 }
 
-// ✅ Read URLs
+// ✅ Read URLs from file
 function readUrlsFromFile(filepath) {
     if (!fs.existsSync(filepath)) {
         console.error(`❌ File not found: ${filepath}`);
@@ -46,6 +51,28 @@ function readUrlsFromFile(filepath) {
         return data.trim().split('\n').map(u => u.trim()).filter(Boolean);
     } catch (err) {
         console.error(`❌ Error reading file ${filepath}: ${err.message}`);
+        return [];
+    }
+}
+
+// ✅ Read URLs from sitemap
+async function readUrlsFromSitemap(sitemapUrl) {
+    console.log(`🔍 Fetching sitemap from: ${sitemapUrl}`);
+    try {
+        const resp = await axios.get(sitemapUrl);
+        const xml = resp.data;
+        const $ = cheerio.load(xml, { xmlMode: true });
+        let urls = [];
+        $('url').each((_, el) => {
+            const loc = $(el).find('loc').text().trim();
+            if (loc) {
+                urls.push(loc);
+            }
+        });
+        console.log(`✅ Found ${urls.length} URLs in sitemap.`);
+        return urls;
+    } catch (err) {
+        console.error(`❌ Error fetching sitemap: ${sitemapUrl} => ${err.message}`);
         return [];
     }
 }
@@ -103,8 +130,12 @@ async function downloadImages(images, destDir, rate) {
 async function clickRejectOptionalCookiesShadowDom(page) {
     console.log('🔍 Attempting to click "Reject optional cookies" in Shadow DOM...');
     try {
-        // Wait for the main host up to 5s
-        await page.waitForSelector('#__tealiumGDPRecModal > tealium-consent', { timeout: 5000 });
+        // Quickly check if the consent element exists instead of waiting 5s.
+        const consentElement = await page.$('#__tealiumGDPRecModal > tealium-consent');
+        if (!consentElement) {
+            console.log('ℹ️ Cookie consent banner not found, skipping.');
+            return;
+        }
 
         // Evaluate in the browser context
         await page.evaluate(() => {
@@ -127,11 +158,30 @@ async function clickRejectOptionalCookiesShadowDom(page) {
             console.log('✅ Clicked "Reject optional cookies" in shadow DOM');
         });
 
-        // short wait
-        await page.waitForTimeout(2000);
+        // Short wait after clicking using custom delay
+        await new Promise(r => setTimeout(r, 2000));
     } catch (err) {
-        console.warn(`⚠️ Could not click "Reject optional cookies" => ${err.message}`);
+        console.warn(`⚠️ Error handling cookie banner => ${err.message}`);
     }
+}
+
+// ✅ Auto-scroll function to trigger lazy-loaded images
+async function autoScroll(page) {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 100;
+            const timer = setInterval(() => {
+                const scrollHeight = document.body.scrollHeight;
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+                if (totalHeight >= scrollHeight - window.innerHeight) {
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 100);
+        });
+    });
 }
 
 // ✅ Capture full-page screenshot => .webp
@@ -153,6 +203,7 @@ async function captureWebpScreenshot(page, outPath) {
 }
 
 // ✅ Process URLs
+// ✅ Process URLs
 async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
     // Launch headless, 1440x900
     const browser = await puppeteer.launch({
@@ -167,7 +218,7 @@ async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
     for (const url of urls) {
         console.log(`🌍 Fetching HTML for: ${url}`);
         try {
-            // get raw HTML
+            // Get raw HTML
             const resp = await axios.get(url);
             const html = resp.data;
 
@@ -208,16 +259,26 @@ async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
 
                 const page = await browser.newPage();
 
-                // confirm the viewport
+                // Confirm the viewport
                 await page.setViewport({ width: 1440, height: 900 });
 
                 await page.goto(url, { waitUntil: 'networkidle0' });
 
-                // Press "Reject optional cookies" in the Shadow DOM
+                // Attempt to click "Reject optional cookies"
                 await clickRejectOptionalCookiesShadowDom(page);
 
-                // short wait
+                // Short wait after clicking cookie banner using custom delay
                 await new Promise(r => setTimeout(r, 2000));
+
+                // Auto-scroll to trigger lazy-loaded images
+                await autoScroll(page);
+                // Extra wait to ensure images have loaded
+                await new Promise(r => setTimeout(r, 2000));
+
+                // Scroll back to the top so table headers and navs reset
+                await page.evaluate(() => window.scrollTo(0, 0));
+                // Wait an extra second for sticky elements to adjust
+                await new Promise(r => setTimeout(r, 1000));
 
                 const webpFile = path.join(screenshotDir, 'index.webp');
                 await captureWebpScreenshot(page, webpFile);
@@ -236,6 +297,8 @@ async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
     console.log("🛑 Closing Puppeteer.");
     await browser.close();
 }
+
+
 
 // ✅ Main
 async function main() {
@@ -257,11 +320,43 @@ async function main() {
     const outDir = generateUniqueOutputDir('./output', scanName);
     console.log(`📂 Using output directory: ${outDir}`);
 
-    // read urls
-    const allUrls = readUrlsFromFile('urls.txt');
-    if (!allUrls.length) {
-        console.error("❌ 'urls.txt' is empty or missing.");
-        process.exit(1);
+    let allUrls = [];
+
+    // Check if -sm flag is provided for sitemap URL
+    if (args.includes('-sm')) {
+        const smIndex = args.indexOf('-sm');
+        const sitemapUrl = args[smIndex + 1];
+        if (!sitemapUrl) {
+            console.error('❌ No sitemap URL provided with -sm flag.');
+            process.exit(1);
+        }
+        allUrls = await readUrlsFromSitemap(sitemapUrl);
+        if (!allUrls.length) {
+            console.error(`❌ Sitemap at ${sitemapUrl} returned no URLs.`);
+            process.exit(1);
+        }
+
+        // Check for ignore flag (-ign) when using sitemap
+        let ignoreList = [];
+        if (args.includes('-ign')) {
+            const ignIndex = args.indexOf('-ign');
+            const ignArg = args[ignIndex + 1];
+            if (ignArg) {
+                ignoreList = ignArg.split(',').map(u => u.trim()).filter(Boolean);
+            }
+        }
+        if (ignoreList.length > 0) {
+            const initialCount = allUrls.length;
+            allUrls = allUrls.filter(url => !ignoreList.some(ignoreUrl => url.startsWith(ignoreUrl)));
+            console.log(`ℹ️ Filtered URLs using ignore list. ${initialCount} => ${allUrls.length} remaining.`);
+        }
+    } else {
+        // Read URLs from file
+        allUrls = readUrlsFromFile('urls.txt');
+        if (!allUrls.length) {
+            console.error("❌ 'urls.txt' is empty or missing.");
+            process.exit(1);
+        }
     }
 
     await processUrls(allUrls, outDir, rate, screenshotFlag, skipImages);
