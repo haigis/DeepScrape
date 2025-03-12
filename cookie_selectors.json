@@ -5,8 +5,7 @@
   },
   "nationwide.co.uk": {
     "buttonTexts": ["Allow essential cookies only"],
-    "bannerSelector": "#cookieBannerContainer",
-    "rejectSelector": "#onetrust-reject-all-handler"
+    "bannerSelector": "#onetrust-reject-all-handler",
   },
   "en.wikipedia.org": {
     "buttonTexts": ["Accept the cookies"],
