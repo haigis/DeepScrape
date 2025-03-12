@@ -1,0 +1,11 @@
+{
+    "barclays.co.uk": {
+      "buttonTexts": ["Reject optional cookies"],
+      "bannerSelector": "#cookieBannerContainer"
+    },
+    "en.wikipedia.org": {
+      "buttonTexts": ["Accept the cookies"],
+      "bannerSelector": "#onetrust-banner-sdk"
+    }
+  }
+  

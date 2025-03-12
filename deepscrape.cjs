@@ -3,155 +3,241 @@ const path = require('path');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
+const sharp = require('sharp');
 const { URL } = require('url');
 
-// ✅ **Read URLs from a File**
+// ✅ Display Help
+function displayHelp() {
+    console.log(`
+DeepScrape - Version 7 (Cookie Banner + WEBP Screenshot)
+
+Usage:
+  node deepscrape.cjs [options]
+
+Options:
+  -h, --help           Show this help message and exit.
+  --no-images          Skip downloading images from the page.
+  --rate-limit <ms>    Delay between operations (default: 1000ms).
+  -n <name>            (Optional) Name for the scan folder.
+  -ss                  Save a full-page WEBP screenshot for each URL.
+                       (at 1440x900 in headless mode)
+
+Examples:
+1) Minimal scan:
+   node deepscrape.cjs
+2) Save screenshots in WEBP:
+   node deepscrape.cjs -ss -n MyScreens
+3) No images, with screenshots:
+   node deepscrape.cjs -ss --no-images -n NoImages
+4) Rate limit 3s:
+   node deepscrape.cjs --rate-limit 3000 -ss
+`);
+    process.exit(0);
+}
+
+// ✅ Read URLs
 function readUrlsFromFile(filepath) {
+    if (!fs.existsSync(filepath)) {
+        console.error(`❌ File not found: ${filepath}`);
+        return [];
+    }
     try {
-        if (!fs.existsSync(filepath)) {
-            console.error(`❌ File not found: ${filepath}`);
-            return [];
-        }
-        const content = fs.readFileSync(filepath, 'utf8').trim();
-        return content ? content.split('\n').map(url => url.trim()) : [];
-    } catch (error) {
-        console.error(`❌ Error reading file ${filepath}: ${error.message}`);
+        const data = fs.readFileSync(filepath, 'utf8');
+        return data.trim().split('\n').map(u => u.trim()).filter(Boolean);
+    } catch (err) {
+        console.error(`❌ Error reading file ${filepath}: ${err.message}`);
         return [];
     }
 }
 
-// ✅ **Generate Unique Output Folder**
-function generateUniqueOutputDir(baseDir = './output', readableName = '') {
+// ✅ Generate Unique Output Dir
+function generateUniqueOutputDir(baseDir = './output', name = '') {
     const timestamp = new Date().toISOString().replace(/[-:.]/g, '').replace('T', '_').slice(0, 15);
     const scanId = Math.random().toString(36).substr(2, 8);
     let folderName = `scan_${timestamp}_${scanId}`;
-    if (readableName) {
-        folderName += `_${readableName.replace(/\s+/g, '_')}`;
+    if (name) {
+        folderName += `_${name.replace(/\s+/g, '_')}`;
     }
     return path.join(baseDir, folderName);
 }
 
-// ✅ **Ensure Directories Exist**
-function ensureDirectories(outputDir, subDir = '') {
-    const fullPath = path.join(outputDir, subDir);
-    if (!fs.existsSync(fullPath)) {
-        fs.mkdirSync(fullPath, { recursive: true });
-        console.log(`📁 Created directory: ${fullPath}`);
+// ✅ Ensure Directory
+function ensureDir(base, sub) {
+    const out = path.join(base, sub);
+    if (!fs.existsSync(out)) {
+        fs.mkdirSync(out, { recursive: true });
+        console.log(`📁 Created directory: ${out}`);
     }
+    return out;
 }
 
-// ✅ **Sanitize Filenames**
-function sanitizeFilename(url) {
-    return url.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+// ✅ Convert domain+path => folder
+function sanitizeUrlToFolderName(url) {
+    return url
+        .replace(/[^a-zA-Z0-9]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '');
 }
 
-// ✅ **Download Images (Now Skippable)**
-async function downloadImages(imageUrls, imagesDir, rateLimitMs, skipDownload) {
-    if (imageUrls.length === 0 || skipDownload) return;
-
-    for (const url of imageUrls) {
+// ✅ Download images
+async function downloadImages(images, destDir, rate) {
+    for (const imgUrl of images) {
+        console.log(`📥 Downloading image: ${imgUrl}`);
         try {
-            console.log(`📥 Downloading image: ${url}`);
-
-            const response = await axios({
-                url,
-                method: 'GET',
-                responseType: 'stream'
-            });
-
-            // Extract filename from URL
-            const filename = path.basename(new URL(url).pathname);
-            const filePath = path.join(imagesDir, filename);
-
-            // Save image
-            response.data.pipe(fs.createWriteStream(filePath));
+            const resp = await axios({ url: imgUrl, method: 'GET', responseType: 'stream' });
+            const filename = path.basename(new URL(imgUrl).pathname);
+            const filePath = path.join(destDir, filename);
+            resp.data.pipe(fs.createWriteStream(filePath));
             console.log(`✅ Image saved: ${filePath}`);
 
-            if (rateLimitMs > 0) {
-                await new Promise(resolve => setTimeout(resolve, rateLimitMs));
+            if (rate > 0) {
+                await new Promise(r => setTimeout(r, rate));
             }
-        } catch (error) {
-            console.error(`❌ Failed to download image: ${url} - ${error.message}`);
+        } catch (err) {
+            console.error(`❌ Failed to download image: ${imgUrl} => ${err.message}`);
         }
     }
 }
 
-// ✅ **Process URLs (Fetch HTML, Extract Images, Save PDFs)**
-async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag, skipDownload) {
-    let browser = null;
-
+// ✅ Function to click "Reject optional cookies" in a Shadow DOM
+async function clickRejectOptionalCookiesShadowDom(page) {
+    console.log('🔍 Attempting to click "Reject optional cookies" in Shadow DOM...');
     try {
-        if (savePdfFlag) {
-            console.log("🚀 Launching Puppeteer...");
-            browser = await puppeteer.launch({ headless: true });
-        }
+        // Wait for the main host up to 5s
+        await page.waitForSelector('#__tealiumGDPRecModal > tealium-consent', { timeout: 5000 });
 
-        for (const url of urls) {
-            try {
-                console.log(`🌍 Fetching HTML for: ${url}`);
-                const response = await axios.get(url);
-                const html = response.data;
-                const sanitizedPage = sanitizeFilename(new URL(url).hostname + new URL(url).pathname);
-
-                // 📁 Create Folders
-                ensureDirectories(outputDir, `html/${sanitizedPage}`);
-                ensureDirectories(outputDir, `images/${sanitizedPage}`);
-                ensureDirectories(outputDir, `pdf/${sanitizedPage}`);
-
-                // 📄 Save HTML
-                const filePath = path.join(outputDir, `html/${sanitizedPage}/index.html`);
-                fs.writeFileSync(filePath, `<!-- ${url} -->\n${html}`, 'utf8');
-                console.log(`✅ Saved HTML: ${filePath}`);
-
-                // 📷 Extract Images
-                const $ = cheerio.load(html);
-                const imageUrls = [];
-                $('img[src]').each((_, element) => {
-                    const imageUrl = $(element).attr('src');
-                    if (imageUrl) {
-                        const absoluteUrl = new URL(imageUrl, url).href;
-                        imageUrls.push(absoluteUrl);
-                    }
-                });
-
-                // 📄 Save Image URLs in `images.txt`
-                const imagesTxtPath = path.join(outputDir, `images/${sanitizedPage}/images.txt`);
-                if (imageUrls.length > 0) {
-                    fs.writeFileSync(imagesTxtPath, imageUrls.join('\n'), 'utf8');
-                    console.log(`✅ Saved image URLs: ${imagesTxtPath}`);
-
-                    // 📥 **Download Images (Only If Not Skipping)**
-                    await downloadImages(imageUrls, path.join(outputDir, `images/${sanitizedPage}`), rateLimitMs, skipDownload);
-                }
-
-                // 📄 Save PDF Screenshot
-                if (savePdfFlag && browser) {
-                    console.log(`📄 Generating PDF for: ${url}`);
-                    const page = await browser.newPage();
-                    await page.goto(url, { waitUntil: 'networkidle2' });
-
-                    const pdfPath = path.join(outputDir, `pdf/${sanitizedPage}/index.pdf`);
-                    await page.pdf({ path: pdfPath, format: 'A4' });
-                    await page.close();
-                    console.log(`✅ PDF saved: ${pdfPath}`);
-                }
-
-                if (rateLimitMs > 0) {
-                    await new Promise(resolve => setTimeout(resolve, rateLimitMs));
-                }
-            } catch (error) {
-                console.error(`❌ Error processing URL ${url}: ${error.message}`);
+        // Evaluate in the browser context
+        await page.evaluate(() => {
+            const host = document.querySelector('#__tealiumGDPRecModal > tealium-consent');
+            if (!host || !host.shadowRoot) {
+                console.warn('⚠️ Shadow host or root not found');
+                return;
             }
-        }
-    } finally {
-        if (browser) {
-            console.log("🛑 Closing Puppeteer...");
-            await browser.close();
-        }
+            const banner = host.shadowRoot.querySelector('tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)');
+            if (!banner || !banner.shadowRoot) {
+                console.warn('⚠️ tealium-button not found in second child');
+                return;
+            }
+            const realBtn = banner.shadowRoot.querySelector('button');
+            if (!realBtn) {
+                console.warn('⚠️ No final <button> inside tealium-button');
+                return;
+            }
+            realBtn.click();
+            console.log('✅ Clicked "Reject optional cookies" in shadow DOM');
+        });
+
+        // short wait
+        await page.waitForTimeout(2000);
+    } catch (err) {
+        console.warn(`⚠️ Could not click "Reject optional cookies" => ${err.message}`);
     }
 }
 
-// ✅ **Main Function**
+// ✅ Capture full-page screenshot => .webp
+async function captureWebpScreenshot(page, outPath) {
+    console.log(`📸 Capturing screenshot => ${outPath}`);
+    try {
+        // 1) capture PNG in memory
+        const pngBuf = await page.screenshot({
+            fullPage: true,
+            type: 'png'
+        });
+
+        // 2) convert PNG => WEBP with "sharp"
+        await sharp(pngBuf).webp({ quality: 90 }).toFile(outPath);
+        console.log(`✅ Screenshot saved as .webp => ${outPath}`);
+    } catch (err) {
+        console.error(`❌ Error capturing/converting screenshot => ${err.message}`);
+    }
+}
+
+// ✅ Process URLs
+async function processUrls(urls, outDir, rate, screenshotFlag, skipImages) {
+    // Launch headless, 1440x900
+    const browser = await puppeteer.launch({
+        headless: true,
+        defaultViewport: { width: 1440, height: 900 },
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox'
+        ]
+    });
+
+    for (const url of urls) {
+        console.log(`🌍 Fetching HTML for: ${url}`);
+        try {
+            // get raw HTML
+            const resp = await axios.get(url);
+            const html = resp.data;
+
+            const parsed = new URL(url);
+            const domainPath = parsed.hostname + parsed.pathname;
+            const folderName = sanitizeUrlToFolderName(domainPath) || 'root';
+
+            const htmlDir = ensureDir(outDir, `html/${folderName}`);
+            const imagesDir = ensureDir(outDir, `images/${folderName}`);
+            const screenshotDir = ensureDir(outDir, `screenshots/${folderName}`);
+
+            // Save the HTML
+            const htmlFile = path.join(htmlDir, 'index.html');
+            fs.writeFileSync(htmlFile, `<!-- ${url} -->\n${html}`, 'utf8');
+            console.log(`✅ Saved HTML: ${htmlFile}`);
+
+            // Extract images
+            const $ = cheerio.load(html);
+            const imgs = [];
+            $('img[src]').each((_, el) => {
+                const src = $(el).attr('src');
+                if (src) imgs.push(new URL(src, url).href);
+            });
+
+            if (imgs.length > 0) {
+                const imagesTxt = path.join(imagesDir, 'images.txt');
+                fs.writeFileSync(imagesTxt, imgs.join('\n'), 'utf8');
+                console.log(`✅ Saved image URLs: ${imagesTxt}`);
+
+                if (!skipImages) {
+                    await downloadImages(imgs, imagesDir, rate);
+                }
+            }
+
+            // If user specified -ss (screenshots)
+            if (screenshotFlag) {
+                console.log(`📸 Screenshot capturing: ${url}`);
+
+                const page = await browser.newPage();
+
+                // confirm the viewport
+                await page.setViewport({ width: 1440, height: 900 });
+
+                await page.goto(url, { waitUntil: 'networkidle0' });
+
+                // Press "Reject optional cookies" in the Shadow DOM
+                await clickRejectOptionalCookiesShadowDom(page);
+
+                // short wait
+                await new Promise(r => setTimeout(r, 2000));
+
+                const webpFile = path.join(screenshotDir, 'index.webp');
+                await captureWebpScreenshot(page, webpFile);
+
+                await page.close();
+            }
+
+            if (rate > 0) {
+                await new Promise(r => setTimeout(r, rate));
+            }
+        } catch (err) {
+            console.error(`❌ Error for: ${url} => ${err.message}`);
+        }
+    }
+
+    console.log("🛑 Closing Puppeteer.");
+    await browser.close();
+}
+
+// ✅ Main
 async function main() {
     const args = process.argv.slice(2);
 
@@ -159,26 +245,26 @@ async function main() {
         displayHelp();
     }
 
-    const baseOutputDir = './output';
-    const rateLimitIndex = args.indexOf('--rate-limit');
-    const rateLimitMs = rateLimitIndex !== -1 ? parseInt(args[rateLimitIndex + 1], 10) : 1000;
-    const nameIndex = args.indexOf('-n');
-    const readableName = nameIndex !== -1 ? args[nameIndex + 1] : '';
-    const savePdfFlag = args.includes('--pdf');
-    const skipDownload = args.includes('--no-images'); // ✅ NEW FLAG!
+    const screenshotFlag = args.includes('-ss'); // e.g. "node deepscrape.cjs -ss"
+    const skipImages = args.includes('--no-images');
 
-    let allUrls = readUrlsFromFile('urls.txt');
+    const rateIndex = args.indexOf('--rate-limit');
+    const rate = rateIndex !== -1 ? parseInt(args[rateIndex + 1], 10) : 1000;
 
-    if (allUrls.length === 0) {
-        console.error("❌ No URLs found to process.");
+    const nIndex = args.indexOf('-n');
+    const scanName = nIndex !== -1 ? args[nIndex + 1] : '';
+
+    const outDir = generateUniqueOutputDir('./output', scanName);
+    console.log(`📂 Using output directory: ${outDir}`);
+
+    // read urls
+    const allUrls = readUrlsFromFile('urls.txt');
+    if (!allUrls.length) {
+        console.error("❌ 'urls.txt' is empty or missing.");
         process.exit(1);
     }
 
-    const uniqueOutputDir = generateUniqueOutputDir(baseOutputDir, readableName);
-    ensureDirectories(uniqueOutputDir);
-
-    console.log(`📂 Processing URLs, saving files to: ${uniqueOutputDir}`);
-    await processUrls(allUrls, uniqueOutputDir, rateLimitMs, savePdfFlag, skipDownload);
+    await processUrls(allUrls, outDir, rate, screenshotFlag, skipImages);
 
     console.log("✅ Program completed.");
     process.exit(0);
