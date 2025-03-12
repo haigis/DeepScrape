@@ -1,92 +1,81 @@
 
 # DeepScrape
 
-**Version 7** - (Cookie Banner + WEBP Screenshot + Sitemap Support)
+DeepScrape is a powerful web scraping toolkit built with Puppeteer, Axios, Cheerio, and Sharp, featuring:
+
+## Features
+
+- **Cookie Banner Dismissal:** Automatically closes cookie banners using configurable selectors.
+- **Screenshot Capturing** in WEBP format.
+- **Image Downloading** (can be disabled).
+- **Sitemap support** for crawling URLs.
+- **Spider mode** to recursively find links, check broken URLs, and generate reports.
+
+## Installation
+
+```bash
+npm install axios cheerio puppeteer sharp cli-progress
+```
 
 ## Usage
+
 ```bash
 node deepscrape.cjs [options]
 ```
 
-### Options:
-- `-h, --help` - Display help information
-- `--no-images` - Skip downloading images from the page.
-- `--rate-limit <ms>` - Delay between operations (default: 1000ms).
-- `-n <name>` - (Optional) Name for the scan folder.
-- `-ss` - Save a full-page WEBP screenshot for each URL (at 1440x900 in headless mode).
-- `-sm <sitemap_url>` - Use the provided sitemap URL to read URLs instead of urls.txt.
-- `-ign <ignore_urls>` - (Optional) Comma-separated list of URL prefixes to ignore (child pages will also be ignored).
+### Common Options
 
-## Examples
+- `-h, --help` Display help.
+- `--no-images` Skip downloading images.
+- `--rate-limit <ms>` Delay between operations (default: 1000ms).
+- `-n <name>` Name for the scan folder.
+- `-ss` Save screenshots in WEBP format.
+- `-sm <sitemap_url>` Use sitemap to fetch URLs.
+- `-ign <ignore_urls>` Comma-separated URLs to ignore.
+- `-u <url>` Scrape a single URL.
+- `-f <filepath>` Custom file with URLs.
+- `-spider <urls>` Spider mode.
 
-Minimal scan:
+## Spider mode example
+
 ```bash
-node deepscrape.cjs
+node deepscrape.cjs -spider https://example.com -ss
 ```
 
-Save screenshots in WEBP:
-```bash
-node deepscrape.cjs -ss -n MyScreens
-```
+Creates `spider_report.txt` and saves each page's HTML, images, and screenshots in organized folders.
 
-No images, with screenshots:
-```bash
-node deepscrape.cjs -ss --no-images -n NoImages
-```
+## Cookie Banners
 
-Rate limit 3s:
-```bash
-node deepscrape.cjs --rate-limit 3000 -ss
-```
+Configure selectors in `cookie_selectors.json`:
 
-Scan using sitemap and ignore URLs:
-```bash
-node deepscrape.cjs -sm https://example.com/sitemap.xml -ign "https://www.barclays.co.uk/branch-finder/,https://www.barclays.co.uk/contact-us/"
-```
-
-## Features
-- ✅ Full-page WEBP screenshots (1440x900).
-- ✅ Automatic cookie banner handling (configurable via cookie_selectors.json).
-- ✅ Sitemap support for URL extraction.
-- ✅ Customizable rate-limiting.
-- ✅ Option to skip image downloads.
-- ✅ Ignore specific URLs and their child pages.
-- ✅ CLI progress bar with ETA.
-
-## Configuration (cookie_selectors.json)
-Cookie banner handling via JSON:
 ```json
 {
-  "barclays.co.uk": {
-    "buttonTexts": ["Reject optional cookies"],
-    "bannerSelector": "#cookieBannerContainer"
-  },
-  "nationwide.co.uk": {
-    "buttonTexts": ["Allow essential cookies only"],
-    "bannerSelector": "#cookieBannerContainer",
-    "rejectSelector": "#onetrust-reject-all-handler"
-  },
-  "en.wikipedia.org": {
-    "buttonTexts": ["Accept the cookies"],
-    "bannerSelector": "#onetrust-banner-sdk"
+  "example.com": {
+    "rejectSelector": "#reject-btn"
   }
 }
 ```
 
-## Dependencies
+## Examples
+
+- Basic scrape:
+
 ```bash
-npm install puppeteer axios cheerio sharp cli-progress
+node deepscrape.cjs
 ```
 
-## Example Output Folder Structure
+- Scrape with screenshots, no images:
+
+```bash
+node deepscrape.cjs -ss --no-images -n NoImages
 ```
-output/
-└── www.barclays.co.uk
-    └── premier-banking
-        └── barclayloan
-            ├── barclayloan.html
-            ├── barclayloan.webp
-            └── images
-                ├── images.txt
-                └── image1.jpg
+
+- Spider with screenshot:
+
+```bash
+node deepscrape.cjs -spider https://example.com -ss
 ```
+
+## License
+
+MIT License.
