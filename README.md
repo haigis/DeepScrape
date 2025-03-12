@@ -1,28 +1,28 @@
-# DeepScrape - Web Crawler & Image Extractor
+# DeepScrape - Web Crawler, Image Extractor & PDF Renderer
 
 ## Overview
 
-**DeepScrape** is a command-line web crawler designed to fetch HTML pages, extract images, and process sitemap files. It supports rate limiting, readable folder naming, and automatic URL extraction from sitemap.xml files.
+**DeepScrape** is a command-line **web crawler** designed to:
+- Fetch **HTML pages**
+- Extract **image URLs**
+- **Download images** (optional)
+- **Process sitemaps** automatically
+- **Save PDFs of fully rendered pages**
+- **Limit request rate** to avoid detection
 
-### Features
+**Why Use DeepScrape?**
+✔ **Organized Output** – Saves files into structured folders  
+✔ **Sitemap Support** – Automatically extracts URLs from sitemaps  
+✔ **PDF Rendering** – Captures fully rendered pages with Puppeteer  
+✔ **Rate Limiting** – Prevents excessive requests  
+✔ **Simple CLI** – Easy-to-use commands  
 
-✅ **Fetch HTML Pages** – Saves web pages as `.html` files for later analysis.
+---
 
-✅ **Extract Image URLs** – Collects image URLs from web pages and stores them in `images.txt`.
-
-✅ **Download Images (Optional)** – Allows downloading of extracted images.
-
-✅ **Sitemap Processing** – Parses sitemap.xml files to automatically extract URLs.
-
-✅ **Rate Limiting** – Prevents excessive requests with configurable delays.
-
-✅ **Readable Folder Naming** – Organizes scans with timestamps and custom names.
-
-## Installation
+## 📥 Installation
 
 ### Prerequisites
-
-Ensure you have **Node.js** installed on your system.
+Ensure **Node.js** is installed:
 
 ```sh
 node -v  # Check Node.js version
@@ -30,98 +30,113 @@ npm -v   # Check npm version
 ```
 
 ### Clone the Repository
-
 ```sh
 git clone https://github.com/haigis/DeepScrape.git
 cd DeepScrape
 ```
 
 ### Install Dependencies
-
 ```sh
 npm install
 ```
 
-## Usage
+---
 
-### Basic Scan
+## 🚀 Usage
 
+### Basic Web Scrape
 ```sh
-node scan.cjs
+node deepscrape.cjs
 ```
-
 This will:
+✅ Create a new folder in `output/` (e.g., `output/scan_YYYYMMDD_HHMMSS_<scanID>/`).  
+✅ Save HTML files in `html/`.  
+✅ Extract image URLs into `images.txt`.  
 
-- Create a new folder under `output/` (e.g., `output/scan_YYYYMMDD_HHMMSS_<scanID>/`).
-- Save HTML files in `html/`.
-- Store extracted image URLs in `images.txt`.
+---
 
-### Options
+## 🔧 Command Options
 
-#### 1. Show Help Menu
-
+### 1️⃣ Show Help Menu
 ```sh
-node scan.cjs -h
+node deepscrape.cjs -h
 ```
 
-#### 2. Add a Readable Name to Scan Folder
-
+### 2️⃣ Add a Custom Scan Name
 ```sh
-node scan.cjs -n MyCustomScan
+node deepscrape.cjs -n MyCustomScan
 ```
-
-Example folder structure:
-
+Example folder:
 ```
 output/scan_YYYYMMDD_HHMMSS_<scanID>_MyCustomScan/
 ```
 
-#### 3. Process URLs from a Sitemap
-
+### 3️⃣ Process a Sitemap
 ```sh
-node scan.cjs -sm https://example.com/sitemap.xml
+node deepscrape.cjs -sm https://example.com/sitemap.xml
 ```
+This extracts URLs from a **sitemap.xml** and processes them.
 
-Extracts URLs from the sitemap and processes them.
-
-#### 4. Process URLs from a Local File
-
+### 4️⃣ Process URLs from a File
 ```sh
-node scan.cjs -f urls.txt
+node deepscrape.cjs -f urls.txt
 ```
+Scrapes all URLs listed in `urls.txt`.
 
-Reads URLs from `urls.txt` and scrapes each page.
-
-#### 5. Download Images from the Last Scan
-
+### 5️⃣ Save PDFs of Rendered Pages
 ```sh
-node scan.cjs --download-images
+node deepscrape.cjs --pdf -n pdfscan
 ```
+This will:
+✅ Load each page in **Puppeteer**  
+✅ Save it as a **PDF** inside the `pdf/` folder  
 
-#### 6. Adjust Rate Limit (in milliseconds)
-
+### 6️⃣ Download Images from the Last Scan
 ```sh
-node scan.cjs --rate-limit 2000
+node deepscrape.cjs --download-images
 ```
 
-Slows down requests to avoid detection (default: 1000ms).
+### 7️⃣ Set a Rate Limit (in ms)
+```sh
+node deepscrape.cjs --rate-limit 2000
+```
+(Default: **1000ms** delay between requests)
 
-## Output Structure
+---
 
-After running a scan, the output directory contains:
+## 📂 Output Structure
+
+After running DeepScrape, results are stored inside an **organized folder**:
 
 ```
-G:\github\DeepScrape\output\
-│── scan_YYYYMMDD_HHMMSS_<scanID>/
+output/
+│── scan_YYYYMMDD_HHMMSS_<scanID>_MyCustomScan/
 │   │── html/          # Saved HTML files
 │   │── images.txt     # Extracted image URLs
-│   └── images/        # (Optional) Downloaded images
+│   │── images/        # (Optional) Downloaded images
+│   └── pdf/           # (Optional) Rendered PDFs
 ```
 
-## Contributing
+---
 
-Feel free to submit **pull requests** or open **issues** for improvements!
+## 👨‍💻 Contributing
 
-## License
+✔ Open an **issue** for bug reports  
+✔ Submit **pull requests** for improvements  
+
+---
+
+## 📜 License
 
 MIT License © 2024 Haigis/DeepScrape
+
+---
+
+### 🚀 Next Steps
+- **Commit & Push Version 2.5 to GitHub**
+```sh
+git add .
+git commit -m "DeepScrape v2.5 - PDF support, fixes, improvements"
+git push origin main
+```
+- **Update the release on GitHub** with the latest version.
