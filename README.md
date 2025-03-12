@@ -1,135 +1,94 @@
+# DeepScrape
 
-# DeepScrape - Version 8
+DeepScrape is a powerful web scraping tool built using Node.js and Puppeteer. It supports spider crawling, cookie banner handling, and full-page screenshots.
 
-## Overview
+## Features
 
-DeepScrape is an advanced web scraping tool that provides comprehensive features for automated data collection and website crawling.
-
-## Features Explained
-
-### 1. Cookie Banner Handling
-Automatically dismisses cookie consent banners using custom selectors defined per domain in `cookie_selectors.json`. Ensures clean screenshots and HTML.
-
-Example configuration:
-```json
-{
-  "example.com": {
-    "rejectSelector": "#reject-btn"
-  }
-}
-```
-
-### 2. Screenshot Capture (WEBP)
-Captures full-page screenshots in high-quality WEBP format. Perfect for visual archiving and analysis.
-
-### 3. Spider Mode 🕷️
-Recursively explores a website, following internal links, checking for broken links (HTTP status codes), and creates a detailed report (`spider_report.txt`).
-
-### 4. Sitemap Support
-Automatically fetches URLs from XML sitemaps, simplifying bulk website scraping.
-
-### 5. Image Downloading
-Automatically identifies and downloads images from each webpage.
-
-### 6. Taxonomy-Based Output
-Content is organized neatly in folders based on URL taxonomy, ensuring logical and structured data storage.
+- 🔍 **Spider Mode**: Crawl websites recursively, saving HTML, images, and screenshots.
+- 🍪 **Cookie Banner Handling**: Automatically detects and dismisses cookie banners.
+- 📸 **Screenshot Capture**: Captures full-page WEBP screenshots.
+- 📂 **Sitemap Support**: Extract URLs from sitemaps for efficient crawling.
+- ⏳ **Rate Limiting**: Control the delay between requests.
 
 ## Installation
 
-```bash
-npm install axios cheerio puppeteer sharp cli-progress
-```
+1. Install [Node.js](https://nodejs.org/)
+2. Clone or download this repository:
+   ```sh
+   git clone https://github.com/yourusername/DeepScrape.git
+   cd DeepScrape
+   ```
+3. Install dependencies:
+   ```sh
+   npm install
+   ```
 
 ## Usage
 
-```bash
-node deepscrape.cjs [options]
+Basic usage:
+
+```sh
+node deepscrape.cjs -u https://example.com
 ```
 
-### Command-Line Options
+### **Modes**
 
-- `-h, --help` Display this help message.
-- `--no-images` Skip image downloads.
-- `--rate-limit <ms>` Delay between requests (default: 1000ms).
-- `-n <name>` Name the output folder.
-- `-ss` Capture screenshots in WEBP.
-- `-sm <sitemap_url>` Read URLs from a sitemap instead of a file.
-- `-ign <urls>` Ignore URLs (comma-separated prefixes).
-- `-u <url>` Scrape a single URL.
-- `-f <filepath>` Scrape URLs from a custom file.
-- `-spider <urls>` Spider recursively from given URLs.
+- **Single URL Scan**:
 
-### Spider Mode Example
+  ```sh
+  node deepscrape.cjs -u https://example.com
+  ```
 
-Spider a website with screenshots and no images:
+- **Sitemap Scan**:
 
-```bash
-node deepscrape.cjs -spider https://www.example.com -ss --no-images
+  ```sh
+  node deepscrape.cjs -sm https://example.com/sitemap.xml
+  ```
+
+- **Spider Crawl** (Recursively follows same-domain links):
+
+  ```sh
+  node deepscrape.cjs -spider https://example.com
+  ```
+
+- **Batch Processing (From a File)**:
+
+  ```sh
+  node deepscrape.cjs -f urls.txt
+  ```
+
+- **Ignoring URLs**:
+  ```sh
+  node deepscrape.cjs -f urls.txt -ign "https://example.com/private"
+  ```
+
+## Options
+
+```sh
+-h, --help          Show help message.
+-u <url>           Scrape a single URL.
+-f <file>          Read URLs from a file.
+-spider <url>      Spider (recursively) same-domain links.
+-sm <sitemap>      Load URLs from a sitemap.
+-ss                Save full-page screenshots.
+--no-images        Skip downloading images.
+--rate-limit <ms>  Set delay between requests.
 ```
 
-This will:
+## Output
 
-- Recursively explore internal links.
-- Check and report link statuses.
-- Save HTML and screenshots.
-
-### Cookie Banner Configuration (`cookie_selectors.json`)
-
-Define CSS selectors per domain to dismiss cookie banners automatically:
-
-```json
-{
-  "example.com": {
-    "rejectSelector": "#reject-cookies-btn"
-  },
-  "another.com": {
-    "rejectSelector": ".cookie-reject-btn"
-  }
-}
-```
-
-### Examples
-
-- **Minimal scan:**
-
-```bash
-node deepscrape.cjs
-```
-
-- **Screenshot enabled, no images:**
-
-```bash
-node deepscrape.cjs -ss --no-images
-```
-
-- **Spider with Screenshot:**
-
-```bash
-node deepscrape.cjs -spider https://www.nationwide.co.uk -ss
-```
-
-- **Spider multiple URLs with screenshots:**
-
-```bash
-node deepscrape.cjs -spider https://site1.com,https://site2.com -ss
-```
-
-## Output Structure
+Results are saved in the `output/` folder:
 
 ```
 output/
-└── scan_<timestamp>_<id>/
-    ├── domain.com
-    │   ├── page.html
-    │   ├── images/
-    │   └── image files...
-    └── spider_report.txt
+├── scan_<timestamp>_<random>/
+│   ├── example.com/
+│   │   ├── index.html
+│   │   ├── images/
+│   │   ├── screenshots/
+│   ├── spider_report.txt
 ```
-
-## Known Issues
-
-- Ensure `cookie_selectors.json` exists and is correctly formatted.
 
 ## License
 
-MIT License
+MIT License. Free to use and modify.
