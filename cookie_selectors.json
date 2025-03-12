@@ -1,14 +1,8 @@
 {
   "barclays.co.uk": {
-    "buttonTexts": ["Reject optional cookies"],
     "bannerSelector": "#cookieBannerContainer"
   },
   "nationwide.co.uk": {
-    "buttonTexts": ["Allow essential cookies only"],
-    "bannerSelector": "#onetrust-reject-all-handler",
-  },
-  "en.wikipedia.org": {
-    "buttonTexts": ["Accept the cookies"],
-    "bannerSelector": "#onetrust-banner-sdk"
+    "bannerSelector": "#cookieBannerContainer",
+    "rejectSelector": "#onetrust-reject-all-handler"
   }
-}
