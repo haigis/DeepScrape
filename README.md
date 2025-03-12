@@ -1,167 +1,95 @@
-# DeepScrape - Web Crawler, Image Extractor & PDF Renderer
+# **DeepScrape - Web Crawler & Image Extractor** 🚀
 
-## Overview
+### **Version: 2.7** (Now with `--no-images` flag)
 
-**DeepScrape** is a command-line **web crawler** designed to:
+DeepScrape is a **powerful web crawler** that can:
 
-- Fetch **HTML pages**
-- Extract **image URLs**
-- **Download images** (optional)
-- **Process sitemaps** automatically
-- **Save PDFs of fully rendered pages**
-- **Limit request rate** to avoid detection
-
-**Why Use DeepScrape?**
-
-✔ **Organized Output** – Saves files into structured folders  
-✔ **Sitemap Support** – Automatically extracts URLs from sitemaps  
-✔ **PDF Rendering** – Captures fully rendered pages with Puppeteer  
-✔ **Rate Limiting** – Prevents excessive requests  
-✔ **Simple CLI** – Easy-to-use commands
+- ✅ Fetch and save **HTML pages**
+- ✅ Extract and save **image URLs**
+- ✅ **Download** images *(or skip downloading with `--no-images`)*
+- ✅ Generate **PDF snapshots** of fully rendered web pages
+- ✅ Process **sitemap.xml** to extract URLs automatically
+- ✅ Respect **rate limits** to avoid detection
 
 ---
 
-## 📥 Installation
+## **📦 Installation**
+### **1️⃣ Prerequisites**
+- Install **Node.js** (>= v16)
+- Install dependencies:
+  ```sh
+  npm install
+  ```
 
-### Prerequisites
-
-Ensure **Node.js** is installed:
-
-```sh
-node -v  # Check Node.js version
-npm -v   # Check npm version
-```
-
-### Clone the Repository
-
+### **2️⃣ Clone the Repository**
 ```sh
 git clone https://github.com/haigis/DeepScrape.git
 cd DeepScrape
 ```
 
-### Install Dependencies
-
-```sh
-npm install
-```
-
 ---
 
-## 🚀 Usage
+## **🚀 Usage**
 
-### Basic Web Scrape
-
+### **Basic Scan**
 ```sh
-node deepscrape.cjs
+node deepscrape.cjs -n myscan
 ```
+✅ Saves **HTML**, **images**, and **image URLs** in a unique folder.
 
-This will:
-
-✅ Create a new folder in `output/` (e.g., `output/scan_YYYYMMDD_HHMMSS_<scanID>/`).  
-✅ Save HTML files in `html/`.  
-✅ Extract image URLs into `images.txt`.
-
----
-
-## 🔧 Command Options
-
-### 1️⃣ Show Help Menu
-
+### **Download Images** 🖼️
 ```sh
-node deepscrape.cjs -h
+node deepscrape.cjs -n imagescan --download-images
 ```
+✅ Extracts **image URLs** and **downloads all images**.
 
-### 2️⃣ Add a Custom Scan Name
-
+### **Generate PDFs** 📄
 ```sh
-node deepscrape.cjs -n MyCustomScan
+node deepscrape.cjs -n pdfscan --pdf
 ```
+✅ Saves a **PDF snapshot** of each page.
 
-Example folder:
-
+### **Skip Image Downloads** 🚫🖼️
+```sh
+node deepscrape.cjs -n branch --pdf --no-images
 ```
-output/scan_YYYYMMDD_HHMMSS_<scanID>_MyCustomScan/
-```
+✅ **No images downloaded** (but `images.txt` will still be saved).
 
-### 3️⃣ Process a Sitemap
-
+### **Process a Sitemap** 🌍
 ```sh
 node deepscrape.cjs -sm https://example.com/sitemap.xml
 ```
+✅ **Extracts URLs** from the sitemap and processes them.
 
-This extracts URLs from a **sitemap.xml** and processes them.
-
-### 4️⃣ Process URLs from a File
-
+### **Set a Rate Limit** ⏳
 ```sh
-node deepscrape.cjs -f urls.txt
+node deepscrape.cjs -n slowcrawl --rate-limit 3000
 ```
-
-Scrapes all URLs listed in `urls.txt`.
-
-### 5️⃣ Save PDFs of Rendered Pages
-
-```sh
-node deepscrape.cjs --pdf -n pdfscan
-```
-
-This will:
-
-✅ Load each page in **Puppeteer**  
-✅ Save it as a **PDF** inside the `pdf/` folder
-
-### 6️⃣ Download Images from the Last Scan
-
-```sh
-node deepscrape.cjs --download-images
-```
-
-### 7️⃣ Set a Rate Limit (in ms)
-
-```sh
-node deepscrape.cjs --rate-limit 2000
-```
-
-(Default: **1000ms** delay between requests)
+✅ Adds a **3-second delay** between requests.
 
 ---
 
-## 📂 Output Structure
-
-After running DeepScrape, results are stored inside an **organized folder**:
-
+## **📂 Output Structure**
 ```
-output/
-│── scan_YYYYMMDD_HHMMSS_<scanID>_MyCustomScan/
-│   │── html/          # Saved HTML files
-│   │── images.txt     # Extracted image URLs
-│   │── images/        # (Optional) Downloaded images
-│   └── pdf/           # (Optional) Rendered PDFs
+/output/scan_YYYYMMDD_HHMMSS_<scanID>/
+│── html/
+│   ├── example_com/
+│   │   ├── index.html
+│── images/
+│   ├── example_com/
+│   │   ├── images.txt  ✅ Image URLs
+│   │   ├── img1.png    ✅ Image files (if downloaded)
+│── pdf/
+│   ├── example_com/
+│   │   ├── index.pdf   ✅ PDF snapshots
 ```
 
 ---
 
-## 👨‍💻 Contributing
-
-✔ Open an **issue** for bug reports  
-✔ Submit **pull requests** for improvements
+## **💡 Contributing**
+PRs are welcome! Open an **issue** if you find a bug.
 
 ---
 
-## 📜 License
-
+## **📜 License**
 MIT License © 2024 Haigis/DeepScrape
-
----
-
-### 🚀 Next Steps
-
-- **Commit & Push Version 2.5 to GitHub**
-
-```sh
-git add .
-git commit -m "DeepScrape v2.5 - PDF support, fixes, improvements"
-git push origin main
-```
-
-- **Update the release on GitHub** with the latest version.

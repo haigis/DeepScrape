@@ -5,37 +5,22 @@ const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
 const { URL } = require('url');
 
-// Version
-function displayHelp() {
-    console.log(`
-DeepScrape - Version 2.5
-
-Usage:
-  node deepscrape.cjs [options] [file_path | scanID]
-
-Options:
-  -h, --help            Show this help message and exit.
-  --download-images     Download the extracted images from a scan.
-  --rate-limit <ms>     Add a delay (in milliseconds) between operations. Default is 1000ms.
-  -n <name>             Add a readable name to the scan folder.
-  -sm <url>             Specify a sitemap URL to process directly.
-  -f <file_path>        Specify a local file containing URLs to process.
-  --pdf                 Save a PDF screenshot of the fully rendered page.
-
-Examples:
-1. Run a new scan:
-   node deepscrape.cjs -n myscan
-
-2. Save PDF screenshots:
-   node deepscrape.cjs --pdf -n pdfscan
-
-3. Process a sitemap:
-   node deepscrape.cjs -sm https://example.com/sitemap.xml
-`);
-    process.exit(0);
+// ✅ **Read URLs from a File**
+function readUrlsFromFile(filepath) {
+    try {
+        if (!fs.existsSync(filepath)) {
+            console.error(`❌ File not found: ${filepath}`);
+            return [];
+        }
+        const content = fs.readFileSync(filepath, 'utf8').trim();
+        return content ? content.split('\n').map(url => url.trim()) : [];
+    } catch (error) {
+        console.error(`❌ Error reading file ${filepath}: ${error.message}`);
+        return [];
+    }
 }
 
-// Generate a unique output folder
+// ✅ **Generate Unique Output Folder**
 function generateUniqueOutputDir(baseDir = './output', readableName = '') {
     const timestamp = new Date().toISOString().replace(/[-:.]/g, '').replace('T', '_').slice(0, 15);
     const scanId = Math.random().toString(36).substr(2, 8);
@@ -46,38 +31,56 @@ function generateUniqueOutputDir(baseDir = './output', readableName = '') {
     return path.join(baseDir, folderName);
 }
 
-// Ensure directories exist
-function ensureDirectories(outputDir) {
-    const directories = ['html', 'images', 'pdf'];
-    directories.forEach(subdir => {
-        const dirPath = path.join(outputDir, subdir);
-        if (!fs.existsSync(dirPath)) {
-            fs.mkdirSync(dirPath, { recursive: true });
-            console.log(`Created directory: ${dirPath}`);
-        }
-    });
-}
-
-// Read URLs from a file
-function readUrlsFromFile(filepath) {
-    try {
-        if (!fs.existsSync(filepath)) return [];
-        const content = fs.readFileSync(filepath, 'utf8').trim();
-        return content ? content.split('\n').map(url => url.trim()) : [];
-    } catch (error) {
-        console.error(`Error reading file ${filepath}: ${error.message}`);
-        return [];
+// ✅ **Ensure Directories Exist**
+function ensureDirectories(outputDir, subDir = '') {
+    const fullPath = path.join(outputDir, subDir);
+    if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
+        console.log(`📁 Created directory: ${fullPath}`);
     }
 }
 
-// Fetch HTML, extract images, and save PDFs if enabled
-async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag) {
-    const htmlDir = path.join(outputDir, 'html');
-    const pdfDir = path.join(outputDir, 'pdf');
+// ✅ **Sanitize Filenames**
+function sanitizeFilename(url) {
+    return url.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+
+// ✅ **Download Images (Now Skippable)**
+async function downloadImages(imageUrls, imagesDir, rateLimitMs, skipDownload) {
+    if (imageUrls.length === 0 || skipDownload) return;
+
+    for (const url of imageUrls) {
+        try {
+            console.log(`📥 Downloading image: ${url}`);
+
+            const response = await axios({
+                url,
+                method: 'GET',
+                responseType: 'stream'
+            });
+
+            // Extract filename from URL
+            const filename = path.basename(new URL(url).pathname);
+            const filePath = path.join(imagesDir, filename);
+
+            // Save image
+            response.data.pipe(fs.createWriteStream(filePath));
+            console.log(`✅ Image saved: ${filePath}`);
+
+            if (rateLimitMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, rateLimitMs));
+            }
+        } catch (error) {
+            console.error(`❌ Failed to download image: ${url} - ${error.message}`);
+        }
+    }
+}
+
+// ✅ **Process URLs (Fetch HTML, Extract Images, Save PDFs)**
+async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag, skipDownload) {
     let browser = null;
 
     try {
-        // If PDFs are enabled, launch Puppeteer only once
         if (savePdfFlag) {
             console.log("🚀 Launching Puppeteer...");
             browser = await puppeteer.launch({ headless: true });
@@ -88,20 +91,46 @@ async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag) {
                 console.log(`🌍 Fetching HTML for: ${url}`);
                 const response = await axios.get(url);
                 const html = response.data;
+                const sanitizedPage = sanitizeFilename(new URL(url).hostname + new URL(url).pathname);
 
-                // Save HTML
-                const encodedFileName = encodeURIComponent(url) + '.html';
-                const filePath = path.join(htmlDir, encodedFileName);
+                // 📁 Create Folders
+                ensureDirectories(outputDir, `html/${sanitizedPage}`);
+                ensureDirectories(outputDir, `images/${sanitizedPage}`);
+                ensureDirectories(outputDir, `pdf/${sanitizedPage}`);
+
+                // 📄 Save HTML
+                const filePath = path.join(outputDir, `html/${sanitizedPage}/index.html`);
                 fs.writeFileSync(filePath, `<!-- ${url} -->\n${html}`, 'utf8');
                 console.log(`✅ Saved HTML: ${filePath}`);
 
-                // Save PDF screenshot if enabled
+                // 📷 Extract Images
+                const $ = cheerio.load(html);
+                const imageUrls = [];
+                $('img[src]').each((_, element) => {
+                    const imageUrl = $(element).attr('src');
+                    if (imageUrl) {
+                        const absoluteUrl = new URL(imageUrl, url).href;
+                        imageUrls.push(absoluteUrl);
+                    }
+                });
+
+                // 📄 Save Image URLs in `images.txt`
+                const imagesTxtPath = path.join(outputDir, `images/${sanitizedPage}/images.txt`);
+                if (imageUrls.length > 0) {
+                    fs.writeFileSync(imagesTxtPath, imageUrls.join('\n'), 'utf8');
+                    console.log(`✅ Saved image URLs: ${imagesTxtPath}`);
+
+                    // 📥 **Download Images (Only If Not Skipping)**
+                    await downloadImages(imageUrls, path.join(outputDir, `images/${sanitizedPage}`), rateLimitMs, skipDownload);
+                }
+
+                // 📄 Save PDF Screenshot
                 if (savePdfFlag && browser) {
                     console.log(`📄 Generating PDF for: ${url}`);
                     const page = await browser.newPage();
                     await page.goto(url, { waitUntil: 'networkidle2' });
 
-                    const pdfPath = path.join(pdfDir, encodeURIComponent(url) + '.pdf');
+                    const pdfPath = path.join(outputDir, `pdf/${sanitizedPage}/index.pdf`);
                     await page.pdf({ path: pdfPath, format: 'A4' });
                     await page.close();
                     console.log(`✅ PDF saved: ${pdfPath}`);
@@ -110,12 +139,10 @@ async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag) {
                 if (rateLimitMs > 0) {
                     await new Promise(resolve => setTimeout(resolve, rateLimitMs));
                 }
-
             } catch (error) {
                 console.error(`❌ Error processing URL ${url}: ${error.message}`);
             }
         }
-
     } finally {
         if (browser) {
             console.log("🛑 Closing Puppeteer...");
@@ -124,7 +151,7 @@ async function processUrls(urls, outputDir, rateLimitMs, savePdfFlag) {
     }
 }
 
-// Main function
+// ✅ **Main Function**
 async function main() {
     const args = process.argv.slice(2);
 
@@ -137,32 +164,23 @@ async function main() {
     const rateLimitMs = rateLimitIndex !== -1 ? parseInt(args[rateLimitIndex + 1], 10) : 1000;
     const nameIndex = args.indexOf('-n');
     const readableName = nameIndex !== -1 ? args[nameIndex + 1] : '';
-    const sitemapIndex = args.indexOf('-sm');
-    const fileIndex = args.indexOf('-f');
-    const savePdfFlag = args.includes('--pdf'); // ✅ Fixed flag detection
+    const savePdfFlag = args.includes('--pdf');
+    const skipDownload = args.includes('--no-images'); // ✅ NEW FLAG!
 
-    let allUrls = [];
+    let allUrls = readUrlsFromFile('urls.txt');
 
-    if (sitemapIndex !== -1) {
-        const sitemapUrl = args[sitemapIndex + 1];
-        const sitemapUrls = await fetchSitemapUrls(sitemapUrl);
-        allUrls = allUrls.concat(sitemapUrls);
-    } else if (fileIndex !== -1) {
-        const filePath = args[fileIndex + 1];
-        allUrls = readUrlsFromFile(filePath);
-    } else {
-        const urls = readUrlsFromFile('urls.txt');
-        allUrls = urls;
+    if (allUrls.length === 0) {
+        console.error("❌ No URLs found to process.");
+        process.exit(1);
     }
 
     const uniqueOutputDir = generateUniqueOutputDir(baseOutputDir, readableName);
     ensureDirectories(uniqueOutputDir);
 
     console.log(`📂 Processing URLs, saving files to: ${uniqueOutputDir}`);
-    await processUrls(allUrls, uniqueOutputDir, rateLimitMs, savePdfFlag);
-    console.log('✅ Program completed.');
+    await processUrls(allUrls, uniqueOutputDir, rateLimitMs, savePdfFlag, skipDownload);
 
-    // 🚀 Ensures script fully exits
+    console.log("✅ Program completed.");
     process.exit(0);
 }
 
