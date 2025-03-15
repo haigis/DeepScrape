@@ -15,36 +15,35 @@
       text-align: center;
       margin-bottom: 20px;
     }
-    .scan {
+    .scan-container {
       display: flex;
-      align-items: flex-start;
-      padding: 15px;
-      border: 1px solid #ddd;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 20px;
+    }
+    .scan-box {
+      width: 350px;
       background: #fff;
       border-radius: 8px;
-      max-width: 900px;
-      margin: 20px auto;
+      padding: 15px;
+      border: 1px solid #ddd;
       box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
-    .scan-details {
-      flex-grow: 1;
-      padding: 10px;
+    .scan-image {
+      width: 100%;
+      border-radius: 6px;
+      border: 2px solid #ccc;
+      margin-bottom: 10px;
     }
-    .scan h2 {
-      font-size: 20px;
-      margin-bottom: 5px;
+    .scan-details h2 {
+      font-size: 18px;
       color: #007bff;
+      margin-bottom: 5px;
     }
     .scan-meta {
       font-size: 14px;
       color: #666;
       margin-bottom: 8px;
-    }
-    .scan-hostname {
-      font-size: 16px;
-      font-weight: bold;
-      color: #333;
-      margin-bottom: 10px;
     }
     .file-table {
       width: 100%;
@@ -52,9 +51,10 @@
       margin-top: 10px;
     }
     .file-table th, .file-table td {
-      padding: 10px;
+      padding: 8px;
       text-align: left;
       border-bottom: 1px solid #ddd;
+      font-size: 14px;
     }
     .file-table th {
       background: #f4f4f4;
@@ -72,7 +72,7 @@
 <body>
 
   <h1>All Scans</h1>
-  <div id="scansContainer">Loading scans...</div>
+  <div id="scansContainer" class="scan-container">Loading scans...</div>
   <p id="error" style="color: red; text-align: center;"></p>
 
   <script>
@@ -83,6 +83,7 @@
         const response = await fetch(`${API_URL}/scans`);
         if (!response.ok) throw new Error("Failed to fetch scans");
         const data = await response.json();
+        console.log("✅ Scans fetched:", data); // Debugging
         return data.scans || [];
       } catch (error) {
         document.getElementById("error").textContent = "Error: " + error.message;
@@ -95,6 +96,7 @@
         const response = await fetch(`${API_URL}/scan/all?scan=${encodeURIComponent(scan)}`);
         if (!response.ok) throw new Error("Failed to fetch files");
         const data = await response.json();
+        console.log(`📂 Files for scan ${scan}:`, data.files); // Debugging
         return data.files || [];
       } catch (error) {
         console.error("Error fetching files for scan:", scan, error);
@@ -103,7 +105,6 @@
     }
 
     function extractHostname(scan) {
-      // Extracts the domain name from the scan path
       const parts = scan.split("/");
       return parts.length > 1 ? parts[1] : "Unknown Hostname";
     }
@@ -120,10 +121,13 @@
 
       for (const scan of scans) {
         const files = await fetchFiles(scan);
-        if (files.length === 0) continue;
+        if (files.length === 0) {
+          console.warn(`⚠️ No files found for scan ${scan}`);
+          continue;
+        }
 
-        const scanDiv = document.createElement("div");
-        scanDiv.className = "scan";
+        const scanBox = document.createElement("div");
+        scanBox.className = "scan-box";
 
         const scanDetailsDiv = document.createElement("div");
         scanDetailsDiv.className = "scan-details";
@@ -152,26 +156,27 @@
           </tr>
         `;
 
-        for (const file of files) {
+        files.forEach(file => {
           const fileUrl = `${API_URL}/output/${file}`;
           const isImage = file.endsWith(".webp");
           const isHtml = file.endsWith(".html");
-          
+
           if (isImage && !firstImage) {
             firstImage = fileUrl;
           }
 
           if (isHtml) {
             const row = document.createElement("tr");
-            const baseName = file.replace(".html", "");
+            const pageName = file.substring(file.lastIndexOf("/") + 1).replace(".html", "");
+
             row.innerHTML = `
-              <td>${baseName}</td>
+              <td>${pageName}</td>
               <td><a href="${fileUrl}" target="_blank">Visit Page</a></td>
               <td><a href="${fileUrl.replace('.html', '.webp')}" target="_blank">View Screenshot</a></td>
             `;
             table.appendChild(row);
           }
-        }
+        });
 
         scanDetailsDiv.appendChild(table);
 
@@ -180,11 +185,11 @@
           previewImage.src = firstImage;
           previewImage.className = "scan-image";
           previewImage.alt = "Scan Preview";
-          scanDiv.appendChild(previewImage);
+          scanBox.appendChild(previewImage);
         }
 
-        scanDiv.appendChild(scanDetailsDiv);
-        scansContainer.appendChild(scanDiv);
+        scanBox.appendChild(scanDetailsDiv);
+        scansContainer.appendChild(scanBox);
       }
     }
 

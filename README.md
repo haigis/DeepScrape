@@ -1,94 +1,118 @@
 # DeepScrape
 
-DeepScrape is a powerful web scraping tool built using Node.js and Puppeteer. It supports spider crawling, cookie banner handling, and full-page screenshots.
+**DeepScrape** is a powerful web scraper that extracts HTML, screenshots, and links from websites. It supports spider crawling, sitemap parsing, and batch processing from files.
 
 ## Features
 
-- 🔍 **Spider Mode**: Crawl websites recursively, saving HTML, images, and screenshots.
-- 🍪 **Cookie Banner Handling**: Automatically detects and dismisses cookie banners.
-- 📸 **Screenshot Capture**: Captures full-page WEBP screenshots.
-- 📂 **Sitemap Support**: Extract URLs from sitemaps for efficient crawling.
-- ⏳ **Rate Limiting**: Control the delay between requests.
+- 🌍 Scrape single URLs
+- 🕷️ Spider Crawl: Recursively scrape internal links
+- 📑 Parse and scrape URLs from sitemaps
+- 📂 Batch process multiple URLs from a file
+- 🖼 Capture webpage screenshots (optional)
+- 🚀 Save HTML with corrected relative paths
+- 🔗 Store discovered and broken links
 
 ## Installation
 
-1. Install [Node.js](https://nodejs.org/)
-2. Clone or download this repository:
-   ```sh
-   git clone https://github.com/yourusername/DeepScrape.git
-   cd DeepScrape
-   ```
-3. Install dependencies:
-   ```sh
-   npm install
-   ```
+### Prerequisites
+
+- Node.js v22+
+- Puppeteer
+- Express.js
+
+### Install Dependencies
+
+```bash
+npm install
+```
 
 ## Usage
 
-Basic usage:
+### Start the API
 
-```sh
-node deepscrape.cjs -u https://example.com
+```bash
+npm run api
 ```
 
-### **Modes**
+### API Endpoints
 
-- **Single URL Scan**:
+#### Scrape a Single URL
 
-  ```sh
-  node deepscrape.cjs -u https://example.com
-  ```
+```http
+POST /scrape
+Content-Type: application/json
 
-- **Sitemap Scan**:
-
-  ```sh
-  node deepscrape.cjs -sm https://example.com/sitemap.xml
-  ```
-
-- **Spider Crawl** (Recursively follows same-domain links):
-
-  ```sh
-  node deepscrape.cjs -spider https://example.com
-  ```
-
-- **Batch Processing (From a File)**:
-
-  ```sh
-  node deepscrape.cjs -f urls.txt
-  ```
-
-- **Ignoring URLs**:
-  ```sh
-  node deepscrape.cjs -f urls.txt -ign "https://example.com/private"
-  ```
-
-## Options
-
-```sh
--h, --help          Show help message.
--u <url>           Scrape a single URL.
--f <file>          Read URLs from a file.
--spider <url>      Spider (recursively) same-domain links.
--sm <sitemap>      Load URLs from a sitemap.
--ss                Save full-page screenshots.
---no-images        Skip downloading images.
---rate-limit <ms>  Set delay between requests.
+{
+  "url": "https://example.com",
+  "screenshot": true,
+  "downloadImages": false,
+  "rateLimit": 1000
+}
 ```
 
-## Output
+#### Spider Crawl (Recursive Scraping)
 
-Results are saved in the `output/` folder:
+```http
+POST /scrape/spider
+Content-Type: application/json
+
+{
+  "url": "https://example.com",
+  "maxDepth": 2,
+  "screenshot": true,
+  "downloadImages": false,
+  "rateLimit": 1000
+}
+```
+
+#### Scrape from a Sitemap
+
+```http
+POST /scrape/sitemap
+Content-Type: application/json
+
+{
+  "sitemapUrl": "https://example.com/sitemap.xml",
+  "ignoreUrls": ["login", "register"],
+  "screenshot": true,
+  "downloadImages": false,
+  "rateLimit": 1000
+}
+```
+
+#### Scrape URLs from a File
+
+```http
+POST /scrape/file
+Content-Type: application/json
+
+{
+  "filePath": "urls.txt",
+  "ignoreUrls": [],
+  "screenshot": true,
+  "downloadImages": false,
+  "rateLimit": 1000
+}
+```
+
+## Output Structure
 
 ```
 output/
-├── scan_<timestamp>_<random>/
-│   ├── example.com/
+├── example.com/
+│   ├── 14-03-2025/
 │   │   ├── index.html
-│   │   ├── images/
-│   │   ├── screenshots/
-│   ├── spider_report.txt
+│   │   ├── page1.html
+│   │   ├── page1.webp (screenshot)
+│   │   ├── all-links.txt
+│   │   ├── broken-links.txt
+│   │   ├── incoming-links.txt
 ```
 
 ## License
 
-MIT License. Free to use and modify.
+MIT License
+
+---
+
+For more details, visit [GitHub Repository](https://github.com/your-repo/DeepScrape).
