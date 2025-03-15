@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepScrape API Tester</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+      text-align: center;
+    }
+
+    h1 {
+      color: #007bff;
+      margin-bottom: 20px;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+      text-align: left;
+    }
+
+    label {
+      font-weight: bold;
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      font-size: 16px;
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      cursor: pointer;
+      transition: 0.3s;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    /* Toggle Switch */
+    .switch-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 50px;
+      height: 24px;
+    }
+
+    .toggle-switch input {
+      display: none;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: 0.3s;
+      border-radius: 24px;
+    }
+
+    .slider::before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: #007bff;
+    }
+
+    input:checked + .slider::before {
+      transform: translateX(26px);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>DeepScrape API Tester</h1>
+
+    <div class="form-group">
+      <label for="mode">Select Mode:</label>
+      <select id="mode" onchange="updateForm()">
+        <option value="scrape">Single URL</option>
+        <option value="sitemap">Sitemap Scrape</option>
+        <option value="spider">Spider Crawl</option>
+        <option value="file">Batch File</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="inputUrl">URL / Sitemap / File Path:</label>
+      <input type="text" id="inputUrl" placeholder="Enter URL, Sitemap URL, or File Path">
+    </div>
+
+    <div class="form-group">
+      <label for="excludeUrls">Exclude URLs (comma-separated):</label>
+      <input type="text" id="excludeUrls" placeholder="e.g., /private/, /admin/">
+    </div>
+
+    <div class="form-group">
+      <label for="rateLimit">Rate Limit (ms):</label>
+      <input type="number" id="rateLimit" value="1000">
+    </div>
+
+    <div id="spiderField" class="form-group" style="display: none;">
+      <label for="maxDepth">Max Depth (Spider Mode Only):</label>
+      <input type="number" id="maxDepth" value="2">
+    </div>
+
+    <div class="form-group switch-container">
+      <label for="screenshotToggle">Include Screenshot</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="screenshotToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="form-group switch-container">
+      <label for="downloadImagesToggle">Download Images</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="downloadImagesToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <button onclick="sendRequest()">Run Scrape</button>
+  </div>
+
+  <script>
+    const API_URL = "http://192.168.1.31:5700";
+
+    function updateForm() {
+      document.getElementById("spiderField").style.display = 
+        document.getElementById("mode").value === "spider" ? "block" : "none";
+    }
+
+    async function sendRequest() {
+      const mode = document.getElementById("mode").value;
+      const inputUrl = document.getElementById("inputUrl").value;
+      const rateLimit = parseInt(document.getElementById("rateLimit").value, 10);
+      const maxDepth = parseInt(document.getElementById("maxDepth").value, 10);
+      const excludeUrls = document.getElementById("excludeUrls").value
+        .split(",")
+        .map(url => url.trim())
+        .filter(url => url.length > 0);
+
+      if (!inputUrl) {
+        alert("Please enter a valid URL, Sitemap URL, or file path!");
+        return;
+      }
+
+      let endpoint = "";
+      let requestBody = { rateLimit, excludeUrls };
+
+      // ✅ **Only include these properties if they are true**
+      if (document.getElementById("screenshotToggle").checked) {
+        requestBody.screenshot = true;
+      }
+      if (document.getElementById("downloadImagesToggle").checked) {
+        requestBody.downloadImages = true;
+      }
+
+      switch (mode) {
+        case "scrape":
+          endpoint = "/scrape";
+          requestBody.url = inputUrl;
+          break;
+        case "sitemap":
+          endpoint = "/scrape/sitemap";
+          requestBody.sitemapUrl = inputUrl;
+          break;
+        case "spider":
+          endpoint = "/scrape/spider";
+          requestBody.url = inputUrl;
+          requestBody.maxDepth = maxDepth;
+          break;
+        case "file":
+          endpoint = "/scrape/file";
+          requestBody.filePath = inputUrl;
+          break;
+      }
+
+      try {
+        console.log("Sending request with payload:", requestBody);
+
+        await fetch(API_URL + endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        });
+
+        alert("Scraping started successfully!"); 
+      } catch (error) {
+        alert("❌ Error: " + error.message);
+      }
+    }
+  </script>
+</body>
+</html>

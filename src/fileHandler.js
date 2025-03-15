@@ -8,6 +8,10 @@ import path from 'path';
  * @returns {string} The full path to the ensured directory.
  */
 export function ensureDir(baseDir, relativePath) {
+    if (!relativePath) {
+        throw new Error("❌ Invalid relativePath provided to ensureDir: " + relativePath);
+    }
+
     const fullPath = path.join(baseDir, relativePath);
     if (!fs.existsSync(fullPath)) {
         fs.mkdirSync(fullPath, { recursive: true });
@@ -19,21 +23,22 @@ export function ensureDir(baseDir, relativePath) {
  * Generates an output directory structure using UK date format.
  * Example:
  * output/
- * ├── 14-03-2024/
- * │   ├── 15-30-45/
- * │   │   ├── www.barclays.co.uk/
- * │   │   │   ├── index.html
- * │   │   │   ├── images/
- * │   │   │   ├── screenshots/
+ * ├── www.example.com/
+ * │   ├── 15-03-2025/
  *
- * @param {string} baseDir - The base directory.
+ * @param {string} baseUrl - The website URL.
  * @returns {string} The generated directory path.
  */
-export function generateOutputDir(baseDir = './output') {
-    const now = new Date();
-    const datePart = now.toLocaleDateString('en-GB').replace(/\//g, '-');
-    const timePart = now.toTimeString().split(' ')[0].replace(/:/g, '-');
-    return path.join(baseDir, datePart, timePart);
+export function generateOutputDir(baseUrl) {
+    try {
+        const now = new Date();
+        const domain = new URL(baseUrl).hostname;
+        const datePart = now.toLocaleDateString('en-GB').replace(/\//g, '-'); // 15-03-2025
+        return path.join('output', domain, datePart);
+    } catch (error) {
+        console.error("❌ Error in generateOutputDir():", error);
+        return "output/unknown"; // Prevents returning undefined
+    }
 }
 
 /**

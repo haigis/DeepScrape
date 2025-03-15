@@ -26,15 +26,6 @@
       margin: 20px auto;
       box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
-    .scan-image {
-      flex-shrink: 0;
-      width: 200px;
-      height: auto;
-      border-radius: 6px;
-      border: 2px solid #ccc;
-      margin-right: 20px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-    }
     .scan-details {
       flex-grow: 1;
       padding: 10px;
@@ -87,7 +78,6 @@
   <script>
     const API_URL = "http://192.168.1.31:5700";
 
-    // Fetch all scans
     async function fetchScans() {
       try {
         const response = await fetch(`${API_URL}/scans`);
@@ -100,7 +90,6 @@
       }
     }
 
-    // Fetch all files for a scan
     async function fetchFiles(scan) {
       try {
         const response = await fetch(`${API_URL}/scan/all?scan=${encodeURIComponent(scan)}`);
@@ -113,138 +102,93 @@
       }
     }
 
-    // Extract hostname from scan files
-    function getHostname(files) {
-  for (const file of files) {
-    // Normalize slashes to avoid issues
-    const normalizedFile = file.replace(/\\/g, "/"); 
-    const parts = normalizedFile.split("/");
-    
-    if (parts.length > 1) {
-      return parts[2]; // Extract the first segment as hostname
+    function extractHostname(scan) {
+      // Extracts the domain name from the scan path
+      const parts = scan.split("/");
+      return parts.length > 1 ? parts[1] : "Unknown Hostname";
     }
-  }
-  return "Unknown Hostname";
-}
 
+    async function buildScansList() {
+      const scansContainer = document.getElementById("scansContainer");
+      scansContainer.innerHTML = "";
+      const scans = await fetchScans();
 
+      if (scans.length === 0) {
+        scansContainer.textContent = "No scans available.";
+        return;
+      }
 
+      for (const scan of scans) {
+        const files = await fetchFiles(scan);
+        if (files.length === 0) continue;
 
+        const scanDiv = document.createElement("div");
+        scanDiv.className = "scan";
 
+        const scanDetailsDiv = document.createElement("div");
+        scanDetailsDiv.className = "scan-details";
 
+        const scanDate = scan.split("/")[0];
+        const hostname = extractHostname(scan);
 
+        const scanTitle = document.createElement("h2");
+        scanTitle.textContent = `Scan Date: ${scanDate}`;
+        scanDetailsDiv.appendChild(scanTitle);
 
+        const scanMeta = document.createElement("p");
+        scanMeta.className = "scan-meta";
+        scanMeta.textContent = `Website: ${hostname}`;
+        scanDetailsDiv.appendChild(scanMeta);
 
+        let firstImage = null;
+        const table = document.createElement("table");
+        table.className = "file-table";
 
-
-
-
-
-async function buildScansList() {
-  const scansContainer = document.getElementById("scansContainer");
-  scansContainer.innerHTML = "";
-  const scans = await fetchScans();
-
-  if (scans.length === 0) {
-    scansContainer.textContent = "No scans available.";
-    return;
-  }
-
-  for (const scan of scans) {
-    const scanDiv = document.createElement("div");
-    scanDiv.className = "scan";
-
-    const scanDetailsDiv = document.createElement("div");
-    scanDetailsDiv.className = "scan-details";
-
-    const scanTitle = document.createElement("h2");
-    scanTitle.textContent = `Scan: ${scan}`;
-    scanDetailsDiv.appendChild(scanTitle);
-
-    const scanMeta = document.createElement("p");
-    scanMeta.className = "scan-meta";
-    scanMeta.textContent = `Scanned at: ${scan.replace("/", " at ")}`;
-    scanDetailsDiv.appendChild(scanMeta);
-
-    const files = await fetchFiles(scan);
-    if (files.length === 0) {
-      scanDetailsDiv.innerHTML += "<p>No files found.</p>";
-    } else {
-      const hostname = getHostname(files);
-      const hostnameElem = document.createElement("p");
-      hostnameElem.className = "scan-hostname";
-      hostnameElem.textContent = `Website: ${hostname}`;
-      scanDetailsDiv.insertBefore(hostnameElem, scanMeta);
-
-      let firstImage = null;
-      const table = document.createElement("table");
-      table.className = "file-table";
-
-      table.innerHTML = `
-        <tr>
-          <th>Page</th>
-          <th>HTML</th>
-        </tr>
-      `;
-
-      const uniquePages = new Set(); // Track unique HTML pages
-
-      for (const file of files) {
-        if (!file.endsWith(".html")) continue; // Ignore non-HTML files
-
-        const fileUrl = `${API_URL}/output/${file}`;
-        
-        // Normalize slashes and extract page name
-        const parts = file.replace(/\\/g, "/").split("/");
-        const pageName = parts.slice(-1)[0];
-
-        // If page is already listed, skip to prevent duplicates
-        if (uniquePages.has(pageName)) continue;
-        uniquePages.add(pageName); // Add to set
-
-        // Find matching image (.webp) for this HTML page
-        const imageUrl = fileUrl.replace(".html", ".webp");
-        if (!firstImage && files.includes(file.replace(".html", ".webp"))) {
-          firstImage = imageUrl;
-        }
-
-        const row = document.createElement("tr");
-
-        row.innerHTML = `
-          <td>${pageName}</td>
-          <td><a href="${fileUrl}" target="_blank">View HTML</a></td>
+        table.innerHTML = `
+          <tr>
+            <th>Page</th>
+            <th>HTML</th>
+            <th>Screenshot</th>
+          </tr>
         `;
 
-        table.appendChild(row);
-      }
+        for (const file of files) {
+          const fileUrl = `${API_URL}/output/${file}`;
+          const isImage = file.endsWith(".webp");
+          const isHtml = file.endsWith(".html");
+          
+          if (isImage && !firstImage) {
+            firstImage = fileUrl;
+          }
 
-      scanDetailsDiv.appendChild(table);
+          if (isHtml) {
+            const row = document.createElement("tr");
+            const baseName = file.replace(".html", "");
+            row.innerHTML = `
+              <td>${baseName}</td>
+              <td><a href="${fileUrl}" target="_blank">Visit Page</a></td>
+              <td><a href="${fileUrl.replace('.html', '.webp')}" target="_blank">View Screenshot</a></td>
+            `;
+            table.appendChild(row);
+          }
+        }
 
-      // If an image was found, add it next to the scan (only one image for the scan)
-      if (firstImage) {
-        const previewImage = document.createElement("img");
-        previewImage.src = firstImage;
-        previewImage.className = "scan-image";
-        previewImage.alt = "Scan Preview";
-        scanDiv.appendChild(previewImage);
+        scanDetailsDiv.appendChild(table);
+
+        if (firstImage) {
+          const previewImage = document.createElement("img");
+          previewImage.src = firstImage;
+          previewImage.className = "scan-image";
+          previewImage.alt = "Scan Preview";
+          scanDiv.appendChild(previewImage);
+        }
+
+        scanDiv.appendChild(scanDetailsDiv);
+        scansContainer.appendChild(scanDiv);
       }
     }
 
-    scanDiv.appendChild(scanDetailsDiv);
-    scansContainer.appendChild(scanDiv);
-  }
-}
-
-buildScansList();
-
-
-
-
-
-
-
-
-
+    buildScansList();
   </script>
 </body>
 </html>

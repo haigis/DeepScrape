@@ -1,41 +1,37 @@
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import axios from 'axios';
-import { ensureDir, buildFolderPath, fixRelativePaths } from './fileHandler.js';
+import { ensureDir, fixRelativePaths, generateOutputDir } from './fileHandler.js'; // ✅ Import generateOutputDir from fileHandler
 import { captureWebpScreenshot } from './screenshot.js';
 import { handleCookieBanner, waitMs } from './cookieHandler.js';
 
 /**
- * Generates a timestamped directory structure using UK format.
- * Example:
- * output/
- * ├── 14-03-2024/
- * │   ├── 15-30-45/
- * │   │   ├── www.barclays.co.uk/
- * │   │   │   ├── index.html
- * │   │   │   ├── images/
- * │   │   │   ├── screenshots/
- * @param {string} baseDir - The base output directory.
- * @returns {string} - The formatted directory path.
+ * Builds a file path that preserves the website structure.
+ * @param {string} url - The page URL.
+ * @returns {string} - Formatted file path.
  */
-function generateOutputDir(baseDir = './output') {
-    const now = new Date();
-    const datePart = now.toLocaleDateString('en-GB').replace(/\//g, '-'); // 14-03-2024
-    const timePart = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // 15-30-45
-    return path.join(baseDir, datePart, timePart);
+export function buildPagePath(url) {
+    const parsedUrl = new URL(url);
+    let pathName = parsedUrl.pathname.replace(/\/$/, '');
+    if (pathName === '' || pathName === '/') {
+        pathName = 'index.html';
+    } else {
+        pathName += '.html';
+    }
+    return path.join(parsedUrl.hostname, pathName);
 }
 
 /**
- * Scrapes a given page and saves its HTML, optionally capturing a screenshot.
+ * Scrapes a given webpage and stores HTML & screenshot while maintaining URL structure.
  * @param {object} browser - Puppeteer browser instance.
  * @param {string} url - The URL to scrape.
- * @param {string} outDir - Output directory path.
+ * @param {string} outDir - Base directory for output.
  * @param {boolean} skipImages - Whether to skip images.
  * @param {boolean} screenshotFlag - Whether to take a screenshot.
  * @param {number} rateLimit - Delay between requests.
  */
-async function scrapePage(browser, url, outDir, skipImages, screenshotFlag, rateLimit) {
+export async function scrapePage(browser, url, outDir, skipImages, screenshotFlag, rateLimit) {
     console.log(`🌍 Navigating: ${url}`);
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
@@ -48,13 +44,11 @@ async function scrapePage(browser, url, outDir, skipImages, screenshotFlag, rate
         let html = await page.content();
         html = fixRelativePaths(html, url);
 
-        const relativeFolderPath = buildFolderPath(url);
-        const pageDir = ensureDir(outDir, relativeFolderPath);
-        const baseName = path.basename(pageDir);
+        const savePath = path.join(outDir, buildPagePath(url));
+        await fs.mkdir(path.dirname(savePath), { recursive: true });
 
-        const htmlFile = path.join(pageDir, `${baseName}.html`);
-        fs.writeFileSync(htmlFile, `<!-- ${url} -->\n${html}`, 'utf8');
-        console.log(`✅ Saved HTML: ${htmlFile}`);
+        await fs.writeFile(savePath, `<!-- ${url} -->\n${html}`, 'utf8');
+        console.log(`✅ Saved HTML: ${savePath}`);
 
         if (screenshotFlag) {
             console.log(`📸 Capturing screenshot for: ${url}`);
@@ -62,7 +56,7 @@ async function scrapePage(browser, url, outDir, skipImages, screenshotFlag, rate
             await waitMs(2000);
             await page.evaluate(() => window.scrollTo(0, 0));
             await waitMs(1000);
-            const screenshotFile = path.join(pageDir, `${baseName}.webp`);
+            const screenshotFile = savePath.replace('.html', '.webp');
             await captureWebpScreenshot(page, screenshotFile);
         }
     } catch (err) {
@@ -94,31 +88,27 @@ async function autoScroll(page) {
 }
 
 /**
- * Processes a list of URLs, saving HTML and optionally taking screenshots.
- * @param {string[]} urls - List of URLs to scrape.
- * @param {string} outDir - Output directory path.
- * @param {number} rateLimit - Delay between requests.
- * @param {boolean} screenshotFlag - Whether to take screenshots.
- * @param {boolean} skipImages - Whether to skip images.
+ * Fetches URLs from a file and filters out ignored URLs.
+ * @param {string} filePath - Path to file with URLs.
+ * @param {string[]} ignoreUrls - List of URLs to ignore.
+ * @returns {Promise<string[]>} - List of valid URLs.
  */
-export async function processUrls(urls, outDir, rateLimit, screenshotFlag, skipImages) {
-    const baseOutDir = generateOutputDir();
-    console.log(`📂 Using output directory: ${baseOutDir}`);
+export async function processFile(filePath, ignoreUrls = []) {
+    console.log(`📂 Reading URLs from file: ${filePath}`);
+    try {
+        const fileContent = await fs.readFile(filePath, 'utf8');
+        const urls = fileContent
+            .trim()
+            .split('\n')
+            .map(url => url.trim())
+            .filter(url => url && !ignoreUrls.includes(url));
 
-    console.log(`🚀 Processing ${urls.length} URLs...`);
-    const browser = await puppeteer.launch({ headless: true });
-
-    for (const url of urls) {
-        try {
-            await scrapePage(browser, url, baseOutDir, skipImages, screenshotFlag, rateLimit);
-        } catch (err) {
-            console.error(`❌ Error scraping ${url}: ${err.message}`);
-        }
-        if (rateLimit > 0) await waitMs(rateLimit);
+        console.log(`✅ Loaded ${urls.length} URLs from file.`);
+        return urls;
+    } catch (error) {
+        console.error(`❌ Error reading file: ${error.message}`);
+        throw error;
     }
-
-    await browser.close();
-    console.log("✅ All URLs processed.");
 }
 
 /**
@@ -128,47 +118,42 @@ export async function processUrls(urls, outDir, rateLimit, screenshotFlag, skipI
  */
 export async function processSitemap(sitemapUrl) {
     console.log(`📡 Fetching sitemap: ${sitemapUrl}`);
-    const { data } = await axios.get(sitemapUrl);
-    const urls = data.match(/<loc>(.*?)<\/loc>/g).map(loc => loc.replace(/<\/?loc>/g, ''));
-    return urls;
+    try {
+        const { data } = await axios.get(sitemapUrl);
+        const urls = [...data.matchAll(/<loc>(.*?)<\/loc>/g)].map(match => match[1]);
+
+        console.log(`✅ Found ${urls.length} URLs in sitemap.`);
+        return urls;
+    } catch (error) {
+        console.error(`❌ Error fetching sitemap: ${error.message}`);
+        throw error;
+    }
 }
 
 /**
- * Reads URLs from a file, filtering out ignored ones.
- * @param {string} filePath - Path to the file containing URLs.
- * @param {string[]} ignoreUrls - List of URLs to ignore.
- * @returns {Promise<string[]>} - List of processed URLs.
- */
-export async function processFile(filePath, ignoreUrls = []) {
-    console.log(`📂 Reading file: ${filePath}`);
-    const urls = fs.readFileSync(filePath, 'utf8').trim().split('\n').map(line => line.trim()).filter(url => url);
-
-    const filteredUrls = urls.filter(url => !ignoreUrls.some(ignore => url.startsWith(ignore)));
-    return filteredUrls;
-}
-
-/**
- * Performs a spider crawl by recursively following same-domain links.
- * @param {string[]} startUrls - Initial URLs to start crawling.
- * @param {string} outDir - Output directory path.
+ * Processes a list of URLs and saves HTML/screenshot in the correct folder structure.
+ * @param {string[]} urls - List of URLs to scrape.
  * @param {number} rateLimit - Delay between requests.
- * @param {number} maxDepth - Maximum depth to crawl.
- * @param {boolean} skipImages - Whether to skip images.
  * @param {boolean} screenshotFlag - Whether to take screenshots.
+ * @param {boolean} downloadImages - Whether to download images.
  */
-export async function spiderCrawl(startUrls, outDir, rateLimit, maxDepth, skipImages, screenshotFlag) {
-    console.log(`🕷️ Starting spider crawl on: ${startUrls[0]}`);
-    const baseOutDir = generateOutputDir();
+export async function processUrls(urls, rateLimit, screenshotFlag = false, downloadImages = false) {
+    console.log(`🚀 Processing ${urls.length} URLs...`);
+    console.log(`🖼 Screenshot: ${screenshotFlag ? 'Enabled' : 'Disabled'}`);
+    console.log(`📥 Download Images: ${downloadImages ? 'Enabled' : 'Disabled'}`);
+
     const browser = await puppeteer.launch({ headless: true });
 
-    for (const url of startUrls) {
+    for (const url of urls) {
         try {
-            await scrapePage(browser, url, baseOutDir, skipImages, screenshotFlag, rateLimit);
+            const outDir = generateOutputDir(url); // ✅ Now correctly using function from fileHandler.js
+            await scrapePage(browser, url, outDir, downloadImages, screenshotFlag, rateLimit);
         } catch (err) {
-            console.error(`❌ Error in spider crawl: ${err.message}`);
+            console.error(`❌ Error scraping ${url}: ${err.message}`);
         }
+        if (rateLimit > 0) await waitMs(rateLimit);
     }
 
     await browser.close();
-    console.log("✅ Spider crawl completed.");
+    console.log("✅ All URLs processed.");
 }
