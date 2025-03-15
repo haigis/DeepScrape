@@ -6,5 +6,9 @@
       "tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)",
       "button"
     ]
+  },
+  "www.nationwide.co.uk": {
+    "clickSelector": "#onetrust-reject-all-handler",
+    "shadowSelectors": []
   }
 }
