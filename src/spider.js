@@ -1,11 +1,9 @@
-import axios from 'axios';
 import puppeteer from 'puppeteer';
 import fs from 'fs/promises';
 import path from 'path';
 import { scrapePage, resolveOptions } from './scraper.js';
-import { ensureDir, generateOutputDir } from './fileHandler.js';
+import { generateOutputDir } from './fileHandler.js';
 import { waitMs } from './utils.js';
-import { URL } from 'url';
 
 /**
  * Checks if the given URL points to an image or disguised image file.
@@ -13,98 +11,135 @@ import { URL } from 'url';
  * @returns {boolean} - Returns true if the URL is an image.
  */
 const isImageUrl = (url) => {
-    return /\.(jpg|jpeg|png|gif|svg|webp|bmp|ico)$/i.test(url) || 
-           /(\.(jpg|jpeg|png|gif|svg|webp|bmp|ico)\.html?)$/i.test(url) || 
-           /(\?|\&)img=/.test(url); // Query strings that reference images
+    return /\.(jpg|jpeg|png|gif|svg|webp|bmp|ico)$/i.test(url) ||
+           /(\.(jpg|jpeg|png|gif|svg|webp|bmp|ico)\.html?)$/i.test(url) ||
+           /(\?|&)img=/.test(url); // Query strings that reference images
+};
+
+/**
+ * Strips URL fragments so /page and /page#section dedupe to one entry.
+ * @param {string} url
+ * @returns {string}
+ */
+const normalizeUrl = (url) => {
+    const u = new URL(url);
+    u.hash = '';
+    return u.href;
 };
 
 /**
  * Spider crawl to recursively scrape pages on the same domain.
+ *
+ * Depth semantics: the start URL is depth 0; maxDepth is the number of
+ * link levels followed from it, inclusive (maxDepth 2 crawls depths 0-2).
+ *
+ * Writes to the scan directory:
+ *  - all-links.txt       every unique link discovered (internal + external)
+ *  - broken-links.txt    crawled pages that failed (HTTP >= 400 or navigation error)
+ *  - incoming-links.json map of URL -> list of pages that link to it
+ *
  * @param {string[]} startUrls - Initial URLs to start crawling.
  * @param {Partial<import('./scraper.js').ScrapeOptions>} options - Scrape options.
+ * @returns {Promise<{visited: number, broken: number, outDir: string}|undefined>}
  */
 export async function spiderCrawl(startUrls, options = {}) {
-    const { rateLimit, maxDepth } = resolveOptions(options);
+    const opts = resolveOptions(options);
+    const { rateLimit, maxDepth } = opts;
+
     if (!startUrls || startUrls.length === 0) {
-        console.error("❌ Error: spiderCrawl received an empty startUrls array.");
+        console.error('❌ Error: spiderCrawl received an empty startUrls array.');
         return;
     }
 
     const domain = new URL(startUrls[0]).hostname;
     const outDir = generateOutputDir(startUrls[0]);
 
-    if (!outDir || outDir === "output/unknown") {
-        console.error("❌ Error: Could not determine a valid output directory.");
+    if (!outDir || outDir === 'output/unknown') {
+        console.error('❌ Error: Could not determine a valid output directory.');
         return;
     }
 
-    ensureDir('./', outDir);
+    await fs.mkdir(outDir, { recursive: true });
 
-    console.log(`🕷️ Starting spider crawl on: ${startUrls[0]}`);
+    console.log(`🕷️ Starting spider crawl on: ${startUrls[0]} (maxDepth: ${maxDepth})`);
 
     const visited = new Set();
     const queued = new Set();
-    const queue = startUrls.map(url => ({ url, depth: 0 }));
+    const queue = [];
+
+    for (const url of startUrls) {
+        const normalized = normalizeUrl(url);
+        if (!queued.has(normalized)) {
+            queued.add(normalized);
+            queue.push({ url: normalized, depth: 0 });
+        }
+    }
 
     const linksList = new Set();
     const brokenLinks = new Set();
+    /** Map of URL -> Set of pages that link to it. */
     const incomingLinks = new Map();
 
     const browser = await puppeteer.launch({ headless: true });
 
-    while (queue.length) {
-        const { url, depth } = queue.shift();
-        if (depth >= maxDepth || visited.has(url) || isImageUrl(url)) continue;
+    try {
+        while (queue.length) {
+            const { url, depth } = queue.shift();
+            if (visited.has(url) || isImageUrl(url)) continue;
 
-        visited.add(url);
-        console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
+            visited.add(url);
+            console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
 
-        try {
-            const response = await axios.head(url, { timeout: 5000 });
+            const result = await scrapePage(browser, url, outDir, opts);
 
-            if (!response.headers['content-type']?.includes('text/html')) {
-                console.log(`🚫 Skipping non-HTML content: ${url}`);
+            if (!result.ok) {
+                // Navigation error or HTTP >= 400 — record and move on.
+                // Non-HTML content types are skipped but not "broken".
+                if (!result.error?.startsWith('non-HTML')) {
+                    console.error(`❌ Broken link: ${url} (${result.error})`);
+                    brokenLinks.add(url);
+                }
                 continue;
             }
 
-            const { data } = await axios.get(url);
-            const matches = [...data.matchAll(/href="([^"]+)"/g)].map(m => m[1]);
-
-            for (let link of matches) {
+            for (const rawLink of result.links) {
+                let link;
                 try {
-                    link = new URL(link, url).href;
+                    link = normalizeUrl(rawLink);
+                } catch {
+                    continue; // Ignore invalid URLs
+                }
+                if (link === url) continue;
 
-                    if (isImageUrl(link) || visited.has(link) || queued.has(link)) continue;
+                linksList.add(link);
 
-                    linksList.add(link);
+                // Record who links to this URL (real incoming-links map).
+                if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
+                incomingLinks.get(link).add(url);
+
+                if (isImageUrl(link) || queued.has(link)) continue;
+
+                if (new URL(link).hostname === domain && depth < maxDepth) {
                     queued.add(link);
-                    if (new URL(link).hostname === domain) {
-                        queue.push({ url: link, depth: depth + 1 });
-                    }
-                } catch (e) {
-                    // Ignore invalid URLs
+                    queue.push({ url: link, depth: depth + 1 });
                 }
             }
-        } catch (err) {
-            console.error(`❌ Broken Link: ${url}`);
-            brokenLinks.add(url);
-        }
 
-        if (!incomingLinks.has(url)) {
-            incomingLinks.set(url, []);
+            if (rateLimit > 0) await waitMs(rateLimit);
         }
-        incomingLinks.get(url).push(url);
-
-        await scrapePage(browser, url, outDir, options);
-        await waitMs(rateLimit);
+    } finally {
+        await browser.close();
     }
 
-    await browser.close();
-    console.log("✅ Spider crawl completed.");
+    console.log(`✅ Spider crawl completed. Visited ${visited.size} pages, ${brokenLinks.size} broken.`);
 
-    await fs.writeFile(path.join(outDir, 'all-links.txt'), Array.from(linksList).join('\n'), 'utf8');
-    await fs.writeFile(path.join(outDir, 'broken-links.txt'), Array.from(brokenLinks).join('\n'), 'utf8');
-    await fs.writeFile(path.join(outDir, 'incoming-links.txt'), JSON.stringify(Object.fromEntries(incomingLinks), null, 2), 'utf8');
+    const incomingAsObject = Object.fromEntries(
+        [...incomingLinks.entries()].map(([link, sources]) => [link, [...sources]]));
+
+    await fs.writeFile(path.join(outDir, 'all-links.txt'), [...linksList].join('\n'), 'utf8');
+    await fs.writeFile(path.join(outDir, 'broken-links.txt'), [...brokenLinks].join('\n'), 'utf8');
+    await fs.writeFile(path.join(outDir, 'incoming-links.json'), JSON.stringify(incomingAsObject, null, 2), 'utf8');
 
     console.log(`📁 Saved crawl results to: ${outDir}`);
+    return { visited: visited.size, broken: brokenLinks.size, outDir };
 }

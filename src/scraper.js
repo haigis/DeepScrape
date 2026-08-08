@@ -93,12 +93,22 @@ async function downloadPageImages(page, pageUrl, imgDir) {
 }
 
 /**
+ * Result of scraping a single page.
+ * @typedef {object} ScrapeResult
+ * @property {boolean}  ok      Whether the page was fetched and saved.
+ * @property {number}   [status] HTTP status of the main navigation response.
+ * @property {string[]} links   Absolute URLs of all <a href> links on the rendered page.
+ * @property {string}   [error] Error message when ok is false.
+ */
+
+/**
  * Scrapes a given webpage and stores HTML, screenshot and images
  * while maintaining URL structure.
  * @param {object} browser - Puppeteer browser instance.
  * @param {string} url - The URL to scrape.
  * @param {string} outDir - Base directory for output.
  * @param {ScrapeOptions} options - Scrape options.
+ * @returns {Promise<ScrapeResult>}
  */
 export async function scrapePage(browser, url, outDir, options = {}) {
     const { screenshot, downloadImages } = resolveOptions(options);
@@ -107,9 +117,27 @@ export async function scrapePage(browser, url, outDir, options = {}) {
     await page.setViewport({ width: 1440, height: 900 });
 
     try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        const status = response?.status();
+
+        if (status && status >= 400) {
+            console.error(`❌ HTTP ${status} for ${url} — not saving.`);
+            return { ok: false, status, links: [], error: `HTTP ${status}` };
+        }
+
+        const contentType = response?.headers()['content-type'] ?? '';
+        if (contentType && !contentType.includes('text/html')) {
+            console.log(`🚫 Skipping non-HTML content (${contentType}): ${url}`);
+            return { ok: false, status, links: [], error: `non-HTML content-type: ${contentType}` };
+        }
+
         await handleCookieBanner(page, url);
         await waitMs(2000);
+
+        // Collect links from the *rendered* DOM — catches JS-injected links
+        // and avoids re-fetching the page with a second HTTP client.
+        const links = await page.$$eval('a[href]', anchors =>
+            anchors.map(a => a.href).filter(href => /^https?:/i.test(href)));
 
         let html = await page.content();
         html = fixRelativePaths(html, url);
@@ -135,8 +163,11 @@ export async function scrapePage(browser, url, outDir, options = {}) {
             const screenshotFile = savePath.replace(/\.html$/, '.webp');
             await captureWebpScreenshot(page, screenshotFile);
         }
+
+        return { ok: true, status, links };
     } catch (err) {
-        console.error(`❌ Error processing ${url}:`, err);
+        console.error(`❌ Error processing ${url}:`, err.message);
+        return { ok: false, links: [], error: err.message };
     } finally {
         await page.close();
     }
