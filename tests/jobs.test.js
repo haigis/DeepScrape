@@ -133,6 +133,33 @@ describe('queue management', () => {
         expect(result.ok).toBe(false);
     });
 
+    it('puts priority jobs ahead of queued normal jobs', async () => {
+        const order = [];
+        blocker(250);
+        const normalA = createJob('test', {}, async () => { order.push('normalA'); });
+        const normalB = createJob('test', {}, async () => { order.push('normalB'); });
+        const urgent = createJob('test', {}, async () => { order.push('urgent'); }, { priority: true });
+
+        expect(getJob(urgent.id).queuePosition).toBe(0);
+        expect(getJob(urgent.id).priority).toBe(true);
+
+        await waitFor(() =>
+            [normalA, normalB, urgent].every(j => getJob(j.id).status === 'completed'), 8000);
+        expect(order).toEqual(['urgent', 'normalA', 'normalB']);
+    });
+
+    it('keeps priority jobs in submission order among themselves', async () => {
+        const order = [];
+        blocker(250);
+        createJob('test', {}, async () => { order.push('normal'); });
+        const p1 = createJob('test', {}, async () => { order.push('p1'); }, { priority: true });
+        const p2 = createJob('test', {}, async () => { order.push('p2'); }, { priority: true });
+
+        await waitFor(() =>
+            [p1, p2].every(j => getJob(j.id).status === 'completed') && order.includes('normal'), 8000);
+        expect(order).toEqual(['p1', 'p2', 'normal']);
+    });
+
     it('reports queue positions in listJobs', async () => {
         blocker(200);
         const a = createJob('test', {}, async () => {});

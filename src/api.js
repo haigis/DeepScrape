@@ -8,6 +8,7 @@ import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
 import { buildScanTree, getPageDetails, getPageHistory } from './scanStore.js';
+import { buildDashboard, buildPageAttributes } from './analytics.js';
 
 const app = express();
 
@@ -95,7 +96,7 @@ app.get('/scans', (req, res) => {
  * Scrapes a single URL.
  */
 app.post('/scrape', (req, res) => {
-  const { url, rateLimit = 1000, screenshot, downloadImages } = req.body;
+  const { url, rateLimit = 1000, screenshot, downloadImages, priority } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const outDir = generateOutputDir(url);
@@ -104,7 +105,8 @@ app.post('/scrape', (req, res) => {
     'scrape',
     { url, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal) =>
-      processUrls([params.url], { ...paramsToOptions(params), onProgress, signal }));
+      processUrls([params.url], { ...paramsToOptions(params), onProgress, signal }),
+    { priority: parseBoolean(priority) });
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, outputDir: outDir });
 });
@@ -351,7 +353,37 @@ app.get('/scan/page', async (req, res) => {
   try {
     const details = await getPageDetails(scanPath, scan, rel);
     if (!details) return res.status(404).json({ error: 'Page not found in scan' });
-    res.json(details);
+
+    // FM-style attributes scored against the rest of the scan.
+    const profile = await buildPageAttributes(scanPath, rel, details);
+    res.json({ ...details, ...(profile ?? {}) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /scan/dashboard?scan=<domain>/<date>
+ * Site analytics for one scan: headline metrics, sections, depth
+ * spread, largest/most-linked/orphan pages, broken links and a
+ * comparison against the previous scan.
+ */
+app.get('/scan/dashboard', async (req, res) => {
+  const scan = req.query.scan;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  const [domain, date] = scan.split('/');
+  if (!domain || !date) return res.status(400).json({ error: 'Scan must be "<domain>/<date>"' });
+
+  try {
+    const dashboard = await buildDashboard(path.dirname(scanPath), domain, date);
+    res.json(dashboard);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

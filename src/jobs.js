@@ -52,21 +52,32 @@ function trimOldJobs() {
  * @param {string} type
  * @param {object} params
  * @param {(onProgress: (p: object) => void, params: object, signal: AbortSignal) => Promise<object>} runner
+ * @param {{priority?: boolean}} [opts] - priority jobs jump the queue
+ *        (used by single-page re-scans, which are quick).
  * @returns {Job}
  */
-export function createJob(type, params, runner) {
+export function createJob(type, params, runner, opts = {}) {
     const job = {
         id: crypto.randomUUID(),
         type,
         params,
         status: 'queued',
+        priority: !!opts.priority,
         createdAt: new Date().toISOString(),
         progress: null,
         result: null,
         error: null,
     };
     jobs.set(job.id, job);
-    queue.push({ job, runner });
+
+    if (opts.priority) {
+        // Ahead of normal jobs, but behind priority jobs already waiting.
+        const firstNormal = queue.findIndex(q => !q.job.priority);
+        queue.splice(firstNormal === -1 ? queue.length : firstNormal, 0, { job, runner });
+    } else {
+        queue.push({ job, runner });
+    }
+
     void pump();
     trimOldJobs();
     return job;
@@ -176,10 +187,20 @@ export function updateJob(id, patch) {
 
 /**
  * @param {string} id
- * @returns {Job|undefined}
+ * @returns {number|null} - Position among queued jobs (0 = runs next).
+ */
+export function getQueuePosition(id) {
+    const idx = queue.findIndex(q => q.job.id === id);
+    return idx === -1 ? null : idx;
+}
+
+/**
+ * @param {string} id
+ * @returns {(Job & {queuePosition: number|null})|undefined}
  */
 export function getJob(id) {
-    return jobs.get(id);
+    const job = jobs.get(id);
+    return job ? { ...job, queuePosition: getQueuePosition(id) } : undefined;
 }
 
 /**
