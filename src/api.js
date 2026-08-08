@@ -7,7 +7,8 @@ import { fetchSitemapUrls } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
-import { buildScanTree, getPageDetails, getPageHistory } from './scanStore.js';
+import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './scanStore.js';
+import { getConsistencyReport } from './consistency.js';
 import { buildDashboard, buildPageAttributes } from './analytics.js';
 
 const app = express();
@@ -414,6 +415,29 @@ app.get('/scan/history', async (req, res) => {
   try {
     const history = await getPageHistory(domainRoot, domain, cleanRel);
     res.json({ domain, path: cleanRel, history });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /scan/consistency?scan=<domain>/<date>
+ * Cross-page content consistency findings: contradictory facts,
+ * metadata conflicts, structured data problems and terminology drift.
+ */
+app.get('/scan/consistency', async (req, res) => {
+  const scan = req.query.scan;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  try {
+    const token = await getScanToken(scanPath);
+    res.json(await getConsistencyReport(scanPath, scan, token));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -162,6 +162,17 @@ async function listPageFiles(scanPath) {
  * @returns {Promise<{index: Map<string, object[]>, pagesIndexed: number, truncated: boolean}>}
  *          index maps a page's scan-relative path to the pages linking to it.
  */
+/**
+ * Cheap fingerprint of a scan's saved pages (count + newest mtime),
+ * used to invalidate derived caches when a scan changes.
+ * @param {string} scanPath
+ * @returns {Promise<string>}
+ */
+export async function getScanToken(scanPath) {
+    const files = await listPageFiles(scanPath);
+    return `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}`;
+}
+
 export async function getInboundIndex(scanPath) {
     const files = await listPageFiles(scanPath);
     const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}`;
