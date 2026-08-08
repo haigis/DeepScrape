@@ -1,5 +1,6 @@
-import { processUrls, processFile, processSitemap, resolveOptions } from './scraper.js';
+import { processUrls, processFile, resolveOptions } from './scraper.js';
 import { spiderCrawl } from './spider.js';
+import { fetchSitemapUrls } from './sitemap.js';
 
 function getFlagValue(args, flag) {
     const idx = args.indexOf(flag);
@@ -76,7 +77,7 @@ Options:
             console.error('❌ -sm requires a sitemap URL.');
             process.exit(1);
         }
-        urls = await processSitemap(sitemap);
+        urls = await fetchSitemapUrls(sitemap);
     } else {
         console.error('❌ No mode specified. Use -u, -f, -sm or -spider (see --help).');
         process.exit(1);

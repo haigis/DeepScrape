@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { processUrls, processSitemap, processFile } from './scraper.js';
+import { processUrls, processFile } from './scraper.js';
+import { fetchSitemapUrls } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 
@@ -96,7 +97,7 @@ app.post('/scrape/sitemap', async (req, res) => {
 
   try {
     console.log(`📡 Fetching sitemap: ${sitemapUrl}`);
-    let urls = await processSitemap(sitemapUrl);
+    let urls = await fetchSitemapUrls(sitemapUrl);
     
     if (ignoreUrls.length > 0) {
       urls = urls.filter(url => !ignoreUrls.some(ignore => url.includes(ignore)));

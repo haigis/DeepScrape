@@ -219,26 +219,6 @@ export async function processFile(filePath, ignoreUrls = []) {
 }
 
 /**
- * Fetches URLs from a sitemap and returns them as an array.
- * NOTE: superseded in issue #4 by a proper XML parser with sitemapindex support.
- * @param {string} sitemapUrl - The URL of the sitemap.
- * @returns {Promise<string[]>} - List of URLs from the sitemap.
- */
-export async function processSitemap(sitemapUrl) {
-    console.log(`📡 Fetching sitemap: ${sitemapUrl}`);
-    try {
-        const { data } = await axios.get(sitemapUrl);
-        const urls = [...data.matchAll(/<loc>(.*?)<\/loc>/g)].map(match => match[1]);
-
-        console.log(`✅ Found ${urls.length} URLs in sitemap.`);
-        return urls;
-    } catch (error) {
-        console.error(`❌ Error fetching sitemap: ${error.message}`);
-        throw error;
-    }
-}
-
-/**
  * Processes a list of URLs and saves HTML/screenshot in the correct folder structure.
  * @param {string[]} urls - List of URLs to scrape.
  * @param {Partial<ScrapeOptions>} options - Scrape options.

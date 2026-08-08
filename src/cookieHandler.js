@@ -1,10 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-
-// Utility: Wait for a specified number of milliseconds
-export async function waitMs(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+import { waitMs } from './utils.js';
 
 // Load cookie banner configurations from `src/cookie_selectors.json`
 let cookieConfigs = {};
