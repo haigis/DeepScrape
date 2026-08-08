@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { extractPageMeta, extractAnchors, urlToScanPath, getInboundIndex } from './scanStore.js';
+import { rateFindings } from './rating.js';
 
 /**
  * Content consistency engine.
@@ -504,9 +505,10 @@ export async function buildConsistencyReport(scanPath, scan) {
         ...await checkTerminology(pages, scanPath),
     ];
 
-    const weight = { high: 12, medium: 6, low: 2 };
-    const penalty = findings.reduce((sum, f) => sum + weight[f.severity], 0);
-    const score = Math.max(0, 100 - Math.min(100, penalty));
+    // rating.v2: pillar scores, size normalisation, per-finding point
+    // attribution. The old flat penalty is gone — see src/rating.js.
+    const rating = rateFindings(findings, pages.length);
+    const score = rating.score;
 
     const summary = { high: 0, medium: 0, low: 0 };
     for (const finding of findings) summary[finding.severity]++;
@@ -518,6 +520,7 @@ export async function buildConsistencyReport(scanPath, scan) {
         scan,
         pages: pages.length,
         score,
+        rating,
         summary,
         byCategory: {
             facts: findings.filter(f => f.category === 'facts').length,
