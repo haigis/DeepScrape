@@ -2,9 +2,37 @@ import fs from 'fs/promises';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import axios from 'axios';
-import { ensureDir, fixRelativePaths, generateOutputDir } from './fileHandler.js'; // ✅ Import generateOutputDir from fileHandler
+import { fixRelativePaths, generateOutputDir } from './fileHandler.js';
 import { captureWebpScreenshot } from './screenshot.js';
-import { handleCookieBanner, waitMs } from './cookieHandler.js';
+import { handleCookieBanner } from './cookieHandler.js';
+import { waitMs } from './utils.js';
+
+/**
+ * Default scrape options shared by the CLI and the API.
+ * A single object prevents the positional-argument drift that
+ * previously broke the CLI (see issue #1).
+ *
+ * @typedef {object} ScrapeOptions
+ * @property {number}  rateLimit       Delay between requests in ms.
+ * @property {number}  maxDepth        Spider crawl depth (levels of links to follow).
+ * @property {boolean} screenshot     Capture a full-page WebP screenshot.
+ * @property {boolean} downloadImages Download page images alongside the HTML.
+ */
+export const defaultOptions = Object.freeze({
+    rateLimit: 1000,
+    maxDepth: 2,
+    screenshot: false,
+    downloadImages: false,
+});
+
+/**
+ * Merges user-supplied options with defaults.
+ * @param {Partial<ScrapeOptions>} options
+ * @returns {ScrapeOptions}
+ */
+export function resolveOptions(options = {}) {
+    return { ...defaultOptions, ...options };
+}
 
 /**
  * Builds a file path that preserves the website structure.
@@ -23,22 +51,64 @@ export function buildPagePath(url) {
 }
 
 /**
- * Scrapes a given webpage and stores HTML & screenshot while maintaining URL structure.
+ * Browser-like User-Agent for direct HTTP requests. Many sites
+ * (e.g. Wikipedia) return 403 to the default axios user agent.
+ */
+export const HTTP_USER_AGENT =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 DeepScrape/1.0';
+
+/**
+ * Downloads all images referenced by the rendered page into an
+ * images/ folder next to the saved HTML.
+ * @param {object} page - Puppeteer page object.
+ * @param {string} pageUrl - URL of the page being scraped (used as Referer).
+ * @param {string} imgDir - Directory to save images into.
+ * @returns {Promise<{saved: number, failed: number}>}
+ */
+async function downloadPageImages(page, pageUrl, imgDir) {
+    const imgUrls = await page.$$eval('img[src]', imgs => imgs.map(i => i.src));
+    const unique = [...new Set(imgUrls)].filter(u => /^https?:/i.test(u));
+    if (unique.length === 0) return { saved: 0, failed: 0 };
+
+    await fs.mkdir(imgDir, { recursive: true });
+    let saved = 0;
+    let failed = 0;
+    for (const imgUrl of unique) {
+        try {
+            const { pathname } = new URL(imgUrl);
+            const name = pathname.replace(/^\//, '').replace(/[^a-z0-9._-]+/gi, '-') || 'image';
+            const { data } = await axios.get(imgUrl, {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                headers: { 'User-Agent': HTTP_USER_AGENT, Referer: pageUrl },
+            });
+            await fs.writeFile(path.join(imgDir, name), data);
+            saved++;
+        } catch (err) {
+            failed++;
+            console.warn(`⚠️ Image download failed (${err.response?.status ?? err.message}): ${imgUrl}`);
+        }
+    }
+    return { saved, failed };
+}
+
+/**
+ * Scrapes a given webpage and stores HTML, screenshot and images
+ * while maintaining URL structure.
  * @param {object} browser - Puppeteer browser instance.
  * @param {string} url - The URL to scrape.
  * @param {string} outDir - Base directory for output.
- * @param {boolean} skipImages - Whether to skip images.
- * @param {boolean} screenshotFlag - Whether to take a screenshot.
- * @param {number} rateLimit - Delay between requests.
+ * @param {ScrapeOptions} options - Scrape options.
  */
-export async function scrapePage(browser, url, outDir, skipImages, screenshotFlag, rateLimit) {
+export async function scrapePage(browser, url, outDir, options = {}) {
+    const { screenshot, downloadImages } = resolveOptions(options);
     console.log(`🌍 Navigating: ${url}`);
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
 
     try {
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        await handleCookieBanner(page, new URL(url).hostname);
+        await handleCookieBanner(page, url);
         await waitMs(2000);
 
         let html = await page.content();
@@ -50,13 +120,19 @@ export async function scrapePage(browser, url, outDir, skipImages, screenshotFla
         await fs.writeFile(savePath, `<!-- ${url} -->\n${html}`, 'utf8');
         console.log(`✅ Saved HTML: ${savePath}`);
 
-        if (screenshotFlag) {
+        if (downloadImages) {
+            const imgDir = path.join(path.dirname(savePath), 'images');
+            const { saved, failed } = await downloadPageImages(page, url, imgDir);
+            console.log(`🖼️ Downloaded ${saved} images (${failed} failed) to: ${imgDir}`);
+        }
+
+        if (screenshot) {
             console.log(`📸 Capturing screenshot for: ${url}`);
             await autoScroll(page);
             await waitMs(2000);
             await page.evaluate(() => window.scrollTo(0, 0));
             await waitMs(1000);
-            const screenshotFile = savePath.replace('.html', '.webp');
+            const screenshotFile = savePath.replace(/\.html$/, '.webp');
             await captureWebpScreenshot(page, screenshotFile);
         }
     } catch (err) {
@@ -113,6 +189,7 @@ export async function processFile(filePath, ignoreUrls = []) {
 
 /**
  * Fetches URLs from a sitemap and returns them as an array.
+ * NOTE: superseded in issue #4 by a proper XML parser with sitemapindex support.
  * @param {string} sitemapUrl - The URL of the sitemap.
  * @returns {Promise<string[]>} - List of URLs from the sitemap.
  */
@@ -133,27 +210,28 @@ export async function processSitemap(sitemapUrl) {
 /**
  * Processes a list of URLs and saves HTML/screenshot in the correct folder structure.
  * @param {string[]} urls - List of URLs to scrape.
- * @param {number} rateLimit - Delay between requests.
- * @param {boolean} screenshotFlag - Whether to take screenshots.
- * @param {boolean} downloadImages - Whether to download images.
+ * @param {Partial<ScrapeOptions>} options - Scrape options.
  */
-export async function processUrls(urls, rateLimit, screenshotFlag = false, downloadImages = false) {
+export async function processUrls(urls, options = {}) {
+    const opts = resolveOptions(options);
     console.log(`🚀 Processing ${urls.length} URLs...`);
-    console.log(`🖼 Screenshot: ${screenshotFlag ? 'Enabled' : 'Disabled'}`);
-    console.log(`📥 Download Images: ${downloadImages ? 'Enabled' : 'Disabled'}`);
+    console.log(`🖼 Screenshot: ${opts.screenshot ? 'Enabled' : 'Disabled'}`);
+    console.log(`📥 Download Images: ${opts.downloadImages ? 'Enabled' : 'Disabled'}`);
 
     const browser = await puppeteer.launch({ headless: true });
 
-    for (const url of urls) {
-        try {
-            const outDir = generateOutputDir(url); // ✅ Now correctly using function from fileHandler.js
-            await scrapePage(browser, url, outDir, downloadImages, screenshotFlag, rateLimit);
-        } catch (err) {
-            console.error(`❌ Error scraping ${url}: ${err.message}`);
+    try {
+        for (const url of urls) {
+            try {
+                const outDir = generateOutputDir(url);
+                await scrapePage(browser, url, outDir, opts);
+            } catch (err) {
+                console.error(`❌ Error scraping ${url}: ${err.message}`);
+            }
+            if (opts.rateLimit > 0) await waitMs(opts.rateLimit);
         }
-        if (rateLimit > 0) await waitMs(rateLimit);
+    } finally {
+        await browser.close();
     }
-
-    await browser.close();
-    console.log("✅ All URLs processed.");
+    console.log('✅ All URLs processed.');
 }

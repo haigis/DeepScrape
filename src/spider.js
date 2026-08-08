@@ -2,7 +2,7 @@ import axios from 'axios';
 import puppeteer from 'puppeteer';
 import fs from 'fs/promises';
 import path from 'path';
-import { scrapePage } from './scraper.js';
+import { scrapePage, resolveOptions } from './scraper.js';
 import { ensureDir, generateOutputDir } from './fileHandler.js';
 import { waitMs } from './utils.js';
 import { URL } from 'url';
@@ -21,12 +21,10 @@ const isImageUrl = (url) => {
 /**
  * Spider crawl to recursively scrape pages on the same domain.
  * @param {string[]} startUrls - Initial URLs to start crawling.
- * @param {number} rateLimit - Delay between requests (ms).
- * @param {number} maxDepth - Maximum depth to crawl.
- * @param {boolean} downloadImages - Whether to download images.
- * @param {boolean} screenshotFlag - Whether to take screenshots.
+ * @param {Partial<import('./scraper.js').ScrapeOptions>} options - Scrape options.
  */
-export async function spiderCrawl(startUrls, rateLimit, maxDepth, downloadImages, screenshotFlag) {
+export async function spiderCrawl(startUrls, options = {}) {
+    const { rateLimit, maxDepth } = resolveOptions(options);
     if (!startUrls || startUrls.length === 0) {
         console.error("❌ Error: spiderCrawl received an empty startUrls array.");
         return;
@@ -97,7 +95,7 @@ export async function spiderCrawl(startUrls, rateLimit, maxDepth, downloadImages
         }
         incomingLinks.get(url).push(url);
 
-        await scrapePage(browser, url, outDir, downloadImages, screenshotFlag, rateLimit);
+        await scrapePage(browser, url, outDir, options);
         await waitMs(rateLimit);
     }
 

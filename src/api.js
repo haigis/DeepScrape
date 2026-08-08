@@ -77,7 +77,7 @@ app.post('/scrape', async (req, res) => {
     console.log(`🖼 Screenshot: ${screenshotFlag ? 'Enabled' : 'Disabled'}`);
     console.log(`📥 Download Images: ${downloadImagesFlag ? 'Enabled' : 'Disabled'}`);
 
-    await processUrls([url], rateLimit, screenshotFlag, downloadImagesFlag);
+    await processUrls([url], { rateLimit, screenshot: screenshotFlag, downloadImages: downloadImagesFlag });
 
     res.json({ success: true, outputDir: outDir });
   } catch (error) {
@@ -108,7 +108,7 @@ app.post('/scrape/sitemap', async (req, res) => {
     console.log(`🚀 Processing ${urls.length} URLs...`);
     const outDir = generateOutputDir(urls[0]);
 
-    await processUrls(urls, rateLimit, parseBoolean(screenshot), parseBoolean(downloadImages));
+    await processUrls(urls, { rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) });
 
     res.json({ success: true, processedUrls: urls.length, ignoredUrls: ignoreUrls.length, outputDir: outDir });
   } catch (error) {
@@ -130,7 +130,7 @@ app.post('/scrape/spider', async (req, res) => {
     const outDir = generateOutputDir(url);
     if (!outDir) throw new Error("❌ Could not determine a valid output directory.");
 
-    await spiderCrawl([url], rateLimit, maxDepth, parseBoolean(downloadImages), parseBoolean(screenshot));
+    await spiderCrawl([url], { rateLimit, maxDepth, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) });
 
     res.json({ success: true, outputDir: outDir });
   } catch (error) {
@@ -156,7 +156,7 @@ app.post('/scrape/file', async (req, res) => {
     console.log(`🚀 Processing ${urls.length} URLs...`);
     const outDir = generateOutputDir(urls[0]);
 
-    await processUrls(urls, rateLimit, parseBoolean(screenshot), parseBoolean(downloadImages));
+    await processUrls(urls, { rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) });
 
     res.json({ success: true, processedUrls: urls.length, outputDir: outDir });
   } catch (error) {

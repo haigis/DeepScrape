@@ -1,48 +1,96 @@
-import fs from 'fs';
-import { processUrls } from './scraper.js';
+import { processUrls, processFile, processSitemap, resolveOptions } from './scraper.js';
 import { spiderCrawl } from './spider.js';
-import { generateUniqueOutputDir } from './fileHandler.js';
-import { readUrlsFromSitemap, readUrlsFromFile } from './utils.js';
+
+function getFlagValue(args, flag) {
+    const idx = args.indexOf(flag);
+    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
 
 async function main() {
     const args = process.argv.slice(2);
 
-    if (args.includes('-h') || args.includes('--help')) {
-        console.log(`Usage: node index.js [options]
+    if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
+        console.log(`Usage: node src/index.js [options]
 
 Options:
   -u <url>          Scrape a single URL.
-  -f <file>         Scrape from a file of URLs.
+  -f <file>         Scrape from a file of URLs (one per line).
   -sm <sitemap>     Scrape URLs from a sitemap.
   -spider <url>     Crawl a domain recursively.
-  --no-images       Skip downloading images.
-  -ss               Save a full-page screenshot.
+  --depth <n>       Spider crawl depth (default: 2).
+  --images          Download page images alongside the HTML.
+  -ss               Save a full-page WebP screenshot.
   --rate-limit <ms> Set request delay (default: 1000ms).
+  -h, --help        Show this help message.
 `);
         process.exit(0);
     }
 
-    const screenshotFlag = args.includes('-ss');
-    const skipImages = args.includes('--no-images');
-    const rateLimit = args.includes('--rate-limit') ? parseInt(args[args.indexOf('--rate-limit') + 1], 10) : 1000;
-    const outDir = generateUniqueOutputDir('./output');
+    const options = resolveOptions({
+        screenshot: args.includes('-ss'),
+        downloadImages: args.includes('--images'),
+        rateLimit: args.includes('--rate-limit')
+            ? parseInt(getFlagValue(args, '--rate-limit'), 10)
+            : undefined,
+        maxDepth: args.includes('--depth')
+            ? parseInt(getFlagValue(args, '--depth'), 10)
+            : undefined,
+    });
+
+    if (Number.isNaN(options.rateLimit)) {
+        console.error('❌ --rate-limit requires a number in milliseconds.');
+        process.exit(1);
+    }
+    if (Number.isNaN(options.maxDepth)) {
+        console.error('❌ --depth requires a number.');
+        process.exit(1);
+    }
 
     let urls = [];
 
     if (args.includes('-spider')) {
-        const spiderUrl = args[args.indexOf('-spider') + 1];
-        await spiderCrawl([spiderUrl], outDir, rateLimit, 2, skipImages, screenshotFlag);
+        const spiderUrl = getFlagValue(args, '-spider');
+        if (!spiderUrl) {
+            console.error('❌ -spider requires a URL.');
+            process.exit(1);
+        }
+        await spiderCrawl([spiderUrl], options);
+        return;
     } else if (args.includes('-u')) {
-        urls = [args[args.indexOf('-u') + 1]];
+        const url = getFlagValue(args, '-u');
+        if (!url) {
+            console.error('❌ -u requires a URL.');
+            process.exit(1);
+        }
+        urls = [url];
     } else if (args.includes('-f')) {
-        urls = fs.readFileSync(args[args.indexOf('-f') + 1], 'utf8').trim().split('\n');
+        const file = getFlagValue(args, '-f');
+        if (!file) {
+            console.error('❌ -f requires a file path.');
+            process.exit(1);
+        }
+        urls = await processFile(file);
     } else if (args.includes('-sm')) {
-        urls = await readUrlsFromSitemap(args[args.indexOf('-sm') + 1]);
+        const sitemap = getFlagValue(args, '-sm');
+        if (!sitemap) {
+            console.error('❌ -sm requires a sitemap URL.');
+            process.exit(1);
+        }
+        urls = await processSitemap(sitemap);
+    } else {
+        console.error('❌ No mode specified. Use -u, -f, -sm or -spider (see --help).');
+        process.exit(1);
     }
 
     if (urls.length > 0) {
-        await processUrls(urls, outDir, rateLimit, screenshotFlag, skipImages);
+        await processUrls(urls, options);
+    } else {
+        console.error('❌ No URLs to process.');
+        process.exit(1);
     }
 }
 
-main();
+main().catch(err => {
+    console.error('❌ Fatal error:', err);
+    process.exit(1);
+});
