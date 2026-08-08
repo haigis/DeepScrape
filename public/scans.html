@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>DeepScrape — Scan Browser</title>
+  <title>DeepScrape — Page Tree</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/app.css">
   <style>
     * { box-sizing: border-box; }
     body {
@@ -194,9 +195,15 @@
 </head>
 <body>
 
-  <header>
-    <h1>DeepScrape — Scan Browser</h1>
-    <a href="/scan.html">➕ New scan</a>
+  <header class="topbar">
+    <a class="brand" href="/dashboard.html">⚽ DeepScrape</a>
+    <nav>
+      <a href="/dashboard.html" id="navDash">Dashboard</a>
+      <a href="/scans.html" class="active">Page tree</a>
+      <a href="/scan.html">Scan &amp; queue</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="context" id="crumb"></span>
   </header>
 
   <div class="layout">
@@ -242,6 +249,13 @@
         }
 
         renderSidebar();
+
+        // Deep link: /scans.html?scan=<domain>/<date> opens that scan.
+        const requested = new URLSearchParams(location.search).get("scan");
+        if (requested) {
+          const [domain, date] = requested.split("/");
+          if (sites[domain]?.includes(date)) selectScan(domain, date);
+        }
       } catch (error) {
         document.getElementById("siteList").textContent = "Error: " + error.message;
       }
@@ -299,6 +313,10 @@
       activeScan = `${domain}/${date}`;
       expanded.add(domain);
       renderSidebar();
+
+      document.getElementById("crumb").textContent = `${domain} · ${date}`;
+      document.getElementById("navDash").href = `/dashboard.html?scan=${encodeURIComponent(activeScan)}`;
+      history.replaceState(null, "", `/scans.html?scan=${encodeURIComponent(activeScan)}`);
 
       const main = document.getElementById("mainPanel");
       main.innerHTML = `<p class="placeholder">Loading ${activeScan}…</p>`;

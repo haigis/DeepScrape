@@ -4,7 +4,19 @@
   <meta charset="UTF-8">
   <title>DeepScrape — Page Detail</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/app.css">
   <style>
+    /* Page-specific styles layered on the shared visual language. */
+    .graph-panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 6px; overflow-x: auto; }
+    .graph-hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .g-center rect { fill: var(--ink); }
+    .g-center text { fill: #fff; font-weight: bold; }
+    .g-in rect { fill: #e6f4ec; stroke: #1a8a4a; }
+    .g-out rect { fill: #e8f1fc; stroke: #0b6bcb; }
+    .g-out.broken rect { fill: #fdeaea; stroke: #c62828; }
+    .g-out.external rect { fill: #f3eefe; stroke: #8a3ffc; }
+    .gnode rect { rx: 4; stroke-width: 1.2; }
+    .col-title { fill: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
     * { box-sizing: border-box; }
     body {
       font-family: Arial, sans-serif;
@@ -209,9 +221,15 @@
 </head>
 <body>
 
-  <header>
-    <a href="/scans.html">← All scans</a>
-    <h1 id="crumb">Loading…</h1>
+  <header class="topbar">
+    <a class="brand" href="/dashboard.html">⚽ DeepScrape</a>
+    <nav>
+      <a href="/dashboard.html" id="navDash">Dashboard</a>
+      <a href="/scans.html" id="navTree">Page tree</a>
+      <a href="/scan.html">Scan &amp; queue</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="context" id="crumb">Loading…</span>
   </header>
 
   <div class="wrap" id="content">
@@ -250,6 +268,8 @@
       }
 
       document.getElementById("crumb").textContent = `${domain} · ${scanDate}`;
+      document.getElementById("navDash").href = `/dashboard.html?scan=${encodeURIComponent(scan)}`;
+      document.getElementById("navTree").href = `/scans.html?scan=${encodeURIComponent(scan)}`;
 
       try {
         const [pageRes, histRes] = await Promise.all([
@@ -400,9 +420,176 @@
       // Re-scan this single page (priority job)
       content.appendChild(renderRescan(page));
 
+      // Link neighbourhood graph — how this page connects to the rest
+      content.appendChild(renderGraph(page));
+
       // Link analysis
       content.appendChild(renderLinks(page.links));
     }
+
+    // --- Link neighbourhood graph ----------------------------------------
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const svgEl = (tag, attrs = {}) => {
+      const node = document.createElementNS(SVG_NS, tag);
+      for (const [k, v] of Object.entries(attrs)) if (v != null) node.setAttribute(k, String(v));
+      return node;
+    };
+
+    let tipEl = null;
+    function showTip(event, title, rows, hint) {
+      if (!tipEl) {
+        tipEl = el("div");
+        tipEl.id = "tooltip";
+        document.body.appendChild(tipEl);
+      }
+      tipEl.innerHTML = "";
+      tipEl.appendChild(el("div", "t-title", title));
+      for (const r of rows) if (r) tipEl.appendChild(el("div", "t-row", r));
+      if (hint) tipEl.appendChild(el("div", "t-hint", hint));
+      tipEl.style.display = "block";
+      const rect = tipEl.getBoundingClientRect();
+      let x = event.clientX + 14, y = event.clientY + 14;
+      if (x + rect.width > window.innerWidth - 8) x = event.clientX - rect.width - 14;
+      if (y + rect.height > window.innerHeight - 8) y = event.clientY - rect.height - 14;
+      tipEl.style.left = Math.max(4, x) + "px";
+      tipEl.style.top = Math.max(4, y) + "px";
+    }
+    const hideTip = () => { if (tipEl) tipEl.style.display = "none"; };
+
+    const shortLabel = (text, max = 34) =>
+      text.length > max ? text.slice(0, max - 1) + "…" : text;
+
+    function renderGraph(page) {
+      const section = el("section");
+      section.appendChild(el("h2", null, "Link neighbourhood"));
+
+      const inbound = page.links.incoming.slice(0, 8);
+      const outInternal = page.links.internal.slice(0, 8);
+      const outExternal = page.links.external.slice(0, 4);
+      const outgoing = [...outInternal, ...outExternal.map(e => ({ ...e, external: true }))];
+
+      if (inbound.length === 0 && outgoing.length === 0) {
+        const panel = el("div", "graph-panel");
+        panel.appendChild(el("p", "empty", "No links in or out of this page were recorded."));
+        section.appendChild(panel);
+        return section;
+      }
+
+      const rowH = 34;
+      const boxW = 240, boxH = 24;
+      const width = 980;
+      const midX = width / 2;
+      const rows = Math.max(inbound.length, outgoing.length, 1);
+      const height = Math.max(160, rows * rowH + 70);
+      const centreY = height / 2;
+
+      const root = svgEl("svg", {
+        class: "chart", viewBox: `0 0 ${width} ${height}`, height,
+        preserveAspectRatio: "xMidYMid meet",
+      });
+
+      root.appendChild(Object.assign(
+        svgEl("text", { class: "col-title", x: 0, y: 16 }),
+        { textContent: `Linked from (${page.links.counts.incoming})` }));
+      root.appendChild(Object.assign(
+        svgEl("text", { class: "col-title", x: width, y: 16, "text-anchor": "end" }),
+        { textContent: `Links out (${page.links.counts.internal + page.links.counts.external})` }));
+
+      const edges = [];
+
+      const column = (items, side) => {
+        const startY = centreY - ((items.length - 1) * rowH) / 2;
+        items.forEach((item, i) => {
+          const y = startY + i * rowH;
+          const x = side === "in" ? 0 : width - boxW;
+
+          // Edge from/to the centre node.
+          const fromX = side === "in" ? boxW : midX + 110;
+          const toX = side === "in" ? midX - 110 : width - boxW;
+          const fromY = side === "in" ? y : centreY;
+          const toY = side === "in" ? centreY : y;
+          const edge = svgEl("path", {
+            class: "edge",
+            d: `M ${fromX} ${fromY} C ${(fromX + toX) / 2} ${fromY}, ${(fromX + toX) / 2} ${toY}, ${toX} ${toY}`,
+          });
+          root.appendChild(edge);
+          edges.push(edge);
+
+          const cls = side === "in"
+            ? "gnode g-in"
+            : `gnode g-out${item.external ? " external" : ""}${item.broken ? " broken" : ""}`;
+          const g = svgEl("g", { class: cls });
+          g.appendChild(svgEl("rect", { x, y: y - boxH / 2, width: boxW, height: boxH }));
+
+          const label = item.external
+            ? item.host
+            : (side === "in"
+              ? (item.anchorTexts[0] || sitePathOf(item.path) || item.url)
+              : (item.text || sitePathOf(item.path) || item.url));
+          g.appendChild(Object.assign(
+            svgEl("text", { x: x + 9, y: y + 4 }),
+            { textContent: shortLabel(label) }));
+
+          g.addEventListener("mouseenter", (event) => {
+            edge.classList.add("hot");
+            const rows = side === "in"
+              ? [
+                  item.url,
+                  item.anchorTexts.length ? `Anchor: “${item.anchorTexts.join('”, “')}”` : "(no anchor text)",
+                  item.occurrences > 1 ? `Links here ${item.occurrences}×` : null,
+                  item.nofollow ? "nofollow" : null,
+                ]
+              : [
+                  item.url,
+                  item.text ? `Anchor: “${item.text}”` : "(no anchor text)",
+                  item.external ? `External host: ${item.host}` : (item.broken ? "Broken link" : (item.scraped ? "Target scraped" : "Target not scraped")),
+                  item.nofollow ? "nofollow" : null,
+                ];
+            showTip(event, side === "in" ? "Links to this page" : "This page links to",
+              rows.filter(Boolean),
+              item.pageUrl ? "Click to open that page’s dashboard" : "Click to open the live URL");
+          });
+          g.addEventListener("mousemove", (event) => {
+            if (tipEl && tipEl.style.display === "block") {
+              tipEl.style.left = Math.min(event.clientX + 14, window.innerWidth - tipEl.offsetWidth - 8) + "px";
+              tipEl.style.top = Math.min(event.clientY + 14, window.innerHeight - tipEl.offsetHeight - 8) + "px";
+            }
+          });
+          g.addEventListener("mouseleave", () => { edge.classList.remove("hot"); hideTip(); });
+          g.addEventListener("click", () => {
+            hideTip();
+            if (item.pageUrl) location.href = item.pageUrl;
+            else window.open(item.url, "_blank", "noopener");
+          });
+
+          root.appendChild(g);
+        });
+      };
+
+      column(inbound, "in");
+      column(outgoing, "out");
+
+      // Centre node — this page.
+      const centre = svgEl("g", { class: "gnode g-center" });
+      centre.appendChild(svgEl("rect", { x: midX - 110, y: centreY - 16, width: 220, height: 32 }));
+      centre.appendChild(Object.assign(
+        svgEl("text", { x: midX, y: centreY + 5, "text-anchor": "middle" }),
+        { textContent: shortLabel(sitePathOf(page.path), 30) }));
+      root.appendChild(centre);
+
+      const panel = el("div", "graph-panel");
+      panel.appendChild(root);
+      section.appendChild(panel);
+
+      const hint = el("p", "graph-hint");
+      hint.textContent = "Hover a node to highlight its connection and see the anchor text; click to jump to that page’s dashboard. "
+        + `Showing up to 8 inbound, 8 internal outbound and 4 external hosts.`;
+      section.appendChild(hint);
+      return section;
+    }
+
+    const sitePathOf = (p) => (p ? "/" + p.split("/").slice(1).join("/") : "");
 
     // --- On-page metadata & discoverability ------------------------------
 

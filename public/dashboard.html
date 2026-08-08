@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DeepScrape — Site Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/app.css">
+  <style>
+    .site-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+    .site-card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      padding: 16px; box-shadow: var(--shadow); cursor: pointer;
+      transition: border-color 0.12s, transform 0.12s;
+    }
+    .site-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .site-card .host { font-size: 16px; font-weight: bold; word-break: break-all; }
+    .site-card .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .drill {
+      background: var(--accent-soft); border: 1px solid #cfe1f6; border-radius: 8px;
+      padding: 10px 14px; margin-bottom: 12px; font-size: 13px;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .drill button {
+      background: #fff; border: 1px solid #cfe1f6; border-radius: 5px;
+      padding: 4px 10px; font-size: 12px; color: var(--accent); cursor: pointer;
+    }
+    .drill button:hover { background: var(--accent); color: #fff; }
+    .cmp-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="brand" href="/dashboard.html">⚽ DeepScrape</a>
+    <nav>
+      <a href="/dashboard.html" class="active">Dashboard</a>
+      <a href="/scans.html">Page tree</a>
+      <a href="/scan.html">Scan &amp; queue</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="context" id="context"></span>
+    <select id="dateSelect" style="display:none"></select>
+  </header>
+
+  <div class="wrap" id="root">
+    <p class="empty">Loading…</p>
+  </div>
+
+  <script type="module">
+    import {
+      el, svg, fmtSize, fmtDelta, sitePath, pageHref,
+      tip, hideTooltip, treemap, barChart, histogram, colorFor,
+    } from '/app.js';
+
+    const params = new URLSearchParams(location.search);
+    const scanParam = params.get('scan');
+    const root = document.getElementById('root');
+
+    /** Section currently drilled into, or null for the whole site. */
+    let drillSection = null;
+    let data = null;
+
+    // --- Site picker (no ?scan) ----------------------------------------
+
+    async function showSitePicker() {
+      document.getElementById('context').textContent = 'All sites';
+      root.innerHTML = '';
+      root.appendChild(el('h1', 'page-title', 'Scanned sites'));
+      root.appendChild(el('p', 'subtitle', 'Pick a site to open its dashboard.'));
+
+      const scans = (await (await fetch('/scans')).json()).scans ?? [];
+      if (scans.length === 0) {
+        root.appendChild(el('p', 'empty', 'No scans yet — run one from “Scan & queue”.'));
+        return;
+      }
+
+      // Latest scan per domain.
+      const latest = new Map();
+      for (const scan of scans) {
+        const [domain, date] = scan.split('/');
+        const entry = latest.get(domain) ?? { domain, dates: [] };
+        entry.dates.push(date);
+        latest.set(domain, entry);
+      }
+
+      const grid = el('div', 'site-cards');
+      for (const { domain, dates } of latest.values()) {
+        dates.sort((a, b) => b.localeCompare(a));
+        const card = el('div', 'site-card');
+        card.appendChild(el('div', 'host', domain));
+        card.appendChild(el('div', 'meta',
+          `${dates.length} scan${dates.length === 1 ? '' : 's'} · latest ${dates[0]}`));
+        card.onclick = () => { location.href = `/dashboard.html?scan=${encodeURIComponent(`${domain}/${dates[0]}`)}`; };
+        grid.appendChild(card);
+      }
+      root.appendChild(grid);
+    }
+
+    // --- Scan dashboard -------------------------------------------------
+
+    async function showDashboard(scan) {
+      root.innerHTML = '<p class="empty">Loading dashboard…</p>';
+      const response = await fetch(`/scan/dashboard?scan=${encodeURIComponent(scan)}`);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        root.innerHTML = '';
+        root.appendChild(el('p', 'empty', 'Error: ' + (err.error || response.statusText)));
+        return;
+      }
+      data = await response.json();
+
+      document.getElementById('context').textContent = data.domain;
+      const select = document.getElementById('dateSelect');
+      select.style.display = '';
+      select.innerHTML = '';
+      for (const date of data.availableDates) {
+        const option = el('option', null, date);
+        option.value = date;
+        if (date === data.date) option.selected = true;
+        select.appendChild(option);
+      }
+      select.onchange = () => {
+        location.href = `/dashboard.html?scan=${encodeURIComponent(`${data.domain}/${select.value}`)}`;
+      };
+
+      render();
+    }
+
+    function render() {
+      root.innerHTML = '';
+      const h = data.headline;
+
+      root.appendChild(el('h1', 'page-title', data.domain));
+      root.appendChild(el('p', 'subtitle',
+        `Scan ${data.date} · ${h.pages.toLocaleString()} pages · ${fmtSize(h.totalSize)} of HTML`));
+
+      root.appendChild(headlineTiles(h));
+      if (data.comparison) root.appendChild(comparisonSection());
+      root.appendChild(sectionsSection());
+      root.appendChild(depthSection());
+      root.appendChild(hubsSection());
+      root.appendChild(tablesSection());
+    }
+
+    // Tiles — clickable ones jump to the relevant panel.
+    function headlineTiles(h) {
+      const section = el('section');
+      const tiles = el('div', 'tiles');
+
+      const add = (num, label, sub, cls, onClick, tooltip) => {
+        const tile = el('div', `tile ${cls ?? ''}${onClick ? ' clickable' : ''}`);
+        tile.appendChild(el('div', 'num', typeof num === 'number' ? num.toLocaleString() : num));
+        tile.appendChild(el('div', 'label', label));
+        if (sub) tile.appendChild(el('div', 'sub', sub));
+        if (onClick) tile.onclick = onClick;
+        if (tooltip) tip(tile, () => tooltip);
+        tiles.appendChild(tile);
+      };
+
+      add(h.pages, 'Pages', `median ${fmtSize(h.medianSize)}`, null,
+        () => document.getElementById('sections').scrollIntoView({ behavior: 'smooth' }),
+        { title: 'Saved pages', rows: [`Total ${fmtSize(h.totalSize)}`, `Average ${fmtSize(h.avgSize)}`], hint: 'Click to see the section breakdown' });
+
+      add(h.screenshots, 'Screenshots', `${h.screenshotCoverage}% coverage`,
+        h.screenshotCoverage === 100 ? 'good' : (h.screenshotCoverage === 0 ? '' : 'warn'), null,
+        { title: 'Screenshot coverage', rows: [`${h.screenshots} of ${h.pages} pages have a WebP capture`] });
+
+      add(h.images, 'Images', null, null, null,
+        { title: 'Downloaded images', rows: ['Saved when a scan runs with image download enabled'] });
+
+      add(h.brokenLinks, 'Broken links', null, h.brokenLinks ? 'bad' : 'good',
+        h.brokenLinks ? () => document.getElementById('broken').scrollIntoView({ behavior: 'smooth' }) : null,
+        { title: 'Broken links', rows: ['URLs that failed with HTTP ≥ 400 or a navigation error'], hint: h.brokenLinks ? 'Click to list them' : undefined });
+
+      add(h.orphans, 'Orphans', h.hasCrawlData ? null : 'no crawl data',
+        h.orphans ? 'warn' : 'good',
+        h.orphans ? () => document.getElementById('orphans').scrollIntoView({ behavior: 'smooth' }) : null,
+        { title: 'Orphan pages', rows: ['Pages no other page in this scan links to'], hint: h.orphans ? 'Click to list them' : undefined });
+
+      add(h.maxDepth, 'Max depth', null, null,
+        () => document.getElementById('depth').scrollIntoView({ behavior: 'smooth' }),
+        { title: 'Deepest page', rows: [`${h.maxDepth} folder levels below the site root`], hint: 'Click for the depth spread' });
+
+      section.appendChild(tiles);
+      return section;
+    }
+
+    // Scan-over-scan comparison.
+    function comparisonSection() {
+      const c = data.comparison;
+      const section = el('section');
+      section.appendChild(el('h2', 'section-title', `Change since ${c.previousDate}`));
+
+      const row = el('div', 'cmp-row');
+      const stat = (num, label, cls) => {
+        const tile = el('div', `tile ${cls ?? ''}`);
+        tile.appendChild(el('div', 'num', num));
+        tile.appendChild(el('div', 'label', label));
+        row.appendChild(tile);
+      };
+      stat((c.pageDelta >= 0 ? '+' : '') + c.pageDelta, 'Pages', c.pageDelta === 0 ? '' : (c.pageDelta > 0 ? 'good' : 'bad'));
+      stat(c.addedCount, 'Added', c.addedCount ? 'good' : '');
+      stat(c.removedCount, 'Removed', c.removedCount ? 'bad' : '');
+      stat(c.changedCount, 'Changed', '');
+      stat(fmtDelta(c.sizeDelta), 'HTML size', '');
+      section.appendChild(row);
+
+      if (c.changed.length) {
+        const panel = el('div', 'panel');
+        panel.style.marginTop = '12px';
+        panel.appendChild(barChart({
+          items: c.changed.slice(0, 10).map(ch => ({
+            label: sitePath(ch.path), value: Math.abs(ch.delta), meta: ch,
+          })),
+          color: '#8a3ffc',
+          format: fmtSize,
+          tooltip: (item) => ({
+            title: sitePath(item.meta.path),
+            rows: [`${item.meta.delta > 0 ? 'Grew' : 'Shrank'} by ${fmtSize(Math.abs(item.meta.delta))} since ${c.previousDate}`],
+            hint: 'Click to open this page',
+          }),
+          onClick: (item) => { location.href = pageHref(data.scan, item.meta.path); },
+        }));
+        section.appendChild(panel);
+        section.appendChild(el('p', 'note', 'Biggest content changes since the previous scan — click a bar to open the page.'));
+      }
+      return section;
+    }
+
+    // Section treemap with drill-down.
+    function sectionsSection() {
+      const section = el('section');
+      section.id = 'sections';
+      section.appendChild(el('h2', 'section-title', 'Sections — area = pages'));
+
+      if (drillSection) {
+        const bar = el('div', 'drill');
+        bar.appendChild(el('span', null, `Drilled into /${drillSection} —`));
+        const stats = data.sections.find(s => s.section === drillSection);
+        if (stats) {
+          bar.appendChild(el('strong', null,
+            `${stats.pages} pages, ${fmtSize(stats.size)}, avg ${fmtSize(stats.avgSize)}`));
+        }
+        const back = el('button', null, '← All sections');
+        back.onclick = () => { drillSection = null; render(); };
+        bar.appendChild(back);
+        const openTree = el('button', null, 'Open in page tree →');
+        openTree.onclick = () => { location.href = `/scans.html?scan=${encodeURIComponent(data.scan)}`; };
+        bar.appendChild(openTree);
+        section.appendChild(bar);
+      }
+
+      const panel = el('div', 'panel');
+      panel.appendChild(treemap({
+        items: data.sections.map(s => ({ label: s.section, value: s.pages, meta: s })),
+        height: 260,
+        tooltip: (item) => ({
+          title: `/${item.label}`,
+          rows: [
+            `${item.value.toLocaleString()} pages`,
+            `${fmtSize(item.meta.size)} total · avg ${fmtSize(item.meta.avgSize)}`,
+            `${Math.round((item.value / data.headline.pages) * 100)}% of the site`,
+          ],
+          hint: 'Click to drill into this section',
+        }),
+        onClick: (item) => {
+          drillSection = drillSection === item.label ? null : item.label;
+          render();
+          document.getElementById('sections').scrollIntoView({ behavior: 'smooth' });
+        },
+      }));
+      section.appendChild(panel);
+
+      const legend = el('div', 'legend');
+      data.sections.slice(0, 10).forEach((s, i) => {
+        const key = el('span', 'key');
+        const swatch = el('i');
+        swatch.style.background = colorFor(i);
+        key.append(swatch, document.createTextNode(`/${s.section} (${s.pages})`));
+        legend.appendChild(key);
+      });
+      section.appendChild(legend);
+      return section;
+    }
+
+    function depthSection() {
+      const section = el('section');
+      section.id = 'depth';
+      section.appendChild(el('h2', 'section-title', 'Pages by folder depth'));
+      const panel = el('div', 'panel');
+      panel.appendChild(histogram({
+        items: data.depths.map(d => ({
+          label: `depth ${d.depth}`, value: d.count, meta: d,
+        })),
+        tooltip: (item) => ({
+          title: item.label,
+          rows: [
+            `${item.value.toLocaleString()} pages`,
+            `${Math.round((item.value / data.headline.pages) * 100)}% of the site`,
+          ],
+          hint: 'Deeper pages are further from the front page',
+        }),
+        onClick: () => { location.href = `/scans.html?scan=${encodeURIComponent(data.scan)}`; },
+      }));
+      section.appendChild(panel);
+      return section;
+    }
+
+    function hubsSection() {
+      const section = el('section');
+      section.appendChild(el('h2', 'section-title', 'Most linked-to pages'));
+      const panel = el('div', 'panel');
+
+      const hubs = data.mostLinked.filter(p => p.inbound > 0);
+      if (hubs.length === 0) {
+        panel.appendChild(el('p', 'empty',
+          'No internal link data — run a spider crawl to record which pages link where.'));
+      } else {
+        panel.appendChild(barChart({
+          items: hubs.map(p => ({ label: sitePath(p.path), value: p.inbound, meta: p })),
+          color: '#1a8a4a',
+          tooltip: (item) => ({
+            title: sitePath(item.meta.path),
+            rows: [
+              `${item.value} internal link${item.value === 1 ? '' : 's'} point here`,
+              `HTML ${fmtSize(item.meta.size)}`,
+            ],
+            hint: 'Click to open this page and see its link neighbourhood',
+          }),
+          onClick: (item) => { location.href = pageHref(data.scan, item.meta.path); },
+        }));
+      }
+      section.appendChild(panel);
+      return section;
+    }
+
+    function pageTable(rows, columns) {
+      const table = el('table', 'grid');
+      const head = el('tr');
+      for (const col of columns) head.appendChild(el('th', null, col.label));
+      table.appendChild(head);
+
+      const body = el('tbody');
+      for (const row of rows) {
+        const tr = el('tr');
+        for (const col of columns) {
+          const td = el('td', col.className);
+          td.textContent = col.value(row);
+          tr.appendChild(td);
+        }
+        if (row.path) {
+          tr.onclick = () => { location.href = pageHref(data.scan, row.path); };
+          tip(tr, () => ({
+            title: sitePath(row.path),
+            rows: [row.url ?? ''],
+            hint: 'Click to open this page’s dashboard',
+          }));
+        }
+        body.appendChild(tr);
+      }
+      table.appendChild(body);
+      return table;
+    }
+
+    function tablesSection() {
+      const section = el('section');
+      const cols = el('div', 'cols-2');
+
+      // Largest pages
+      const largest = el('div');
+      largest.appendChild(el('h2', 'section-title', 'Largest pages'));
+      const lPanel = el('div', 'panel');
+      lPanel.appendChild(pageTable(data.largestPages, [
+        { label: 'Page', value: r => sitePath(r.path), className: 'path' },
+        { label: 'Size', value: r => fmtSize(r.size), className: 'num' },
+      ]));
+      largest.appendChild(lPanel);
+      cols.appendChild(largest);
+
+      // Orphans
+      const orphans = el('div');
+      orphans.id = 'orphans';
+      orphans.appendChild(el('h2', 'section-title', `Orphan pages (${data.headline.orphans})`));
+      const oPanel = el('div', 'panel');
+      if (data.orphans.length === 0) {
+        oPanel.appendChild(el('p', 'empty', data.headline.hasCrawlData
+          ? 'None — every page is linked from somewhere.'
+          : 'No crawl data. Run a spider crawl to detect orphans.'));
+      } else {
+        oPanel.appendChild(pageTable(data.orphans, [
+          { label: 'Page', value: r => sitePath(r.path), className: 'path' },
+          { label: 'Size', value: r => fmtSize(r.size), className: 'num' },
+        ]));
+      }
+      orphans.appendChild(oPanel);
+      cols.appendChild(orphans);
+
+      section.appendChild(cols);
+
+      // Broken links
+      const broken = el('div');
+      broken.id = 'broken';
+      broken.style.marginTop = '18px';
+      broken.appendChild(el('h2', 'section-title', `Broken links (${data.headline.brokenLinks})`));
+      const bPanel = el('div', 'panel');
+      if (data.brokenLinks.length === 0) {
+        bPanel.appendChild(el('p', 'empty', 'None recorded in this scan.'));
+      } else {
+        const table = el('table', 'grid');
+        table.appendChild(el('tr')).appendChild(el('th', null, 'URL'));
+        const body = el('tbody');
+        for (const url of data.brokenLinks) {
+          const tr = el('tr');
+          const td = el('td', 'path');
+          const a = el('a', null, url);
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          td.appendChild(a);
+          tr.appendChild(td);
+          body.appendChild(tr);
+        }
+        table.appendChild(body);
+        bPanel.appendChild(table);
+      }
+      broken.appendChild(bPanel);
+      section.appendChild(broken);
+
+      return section;
+    }
+
+    if (scanParam) showDashboard(scanParam); else showSitePicker();
+  </script>
+</body>
+</html>

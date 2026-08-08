@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DeepScrape API Tester</title>
+  <title>DeepScrape — Scan &amp; Queue</title>
+  <link rel="stylesheet" href="/app.css">
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -111,8 +112,17 @@
 </head>
 <body>
 
+  <header class="topbar">
+    <a class="brand" href="/dashboard.html">⚽ DeepScrape</a>
+    <nav>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/scans.html">Page tree</a>
+      <a href="/scan.html" class="active">Scan &amp; queue</a>
+    </nav>
+  </header>
+
   <div class="container">
-    <h1>DeepScrape API Tester</h1>
+    <h1>Run a scan</h1>
 
     <div class="form-group">
       <label for="mode">Select Mode:</label>

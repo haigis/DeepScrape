@@ -1,0 +1,203 @@
+/* DeepScrape shared visual language.
+   Dense, dark chrome with light content panels — everything is
+   hoverable and clickable, in the spirit of a sports-management UI. */
+
+:root {
+  --ink: #16202b;
+  --ink-2: #22303f;
+  --line: #dfe6ee;
+  --bg: #eef2f6;
+  --panel: #ffffff;
+  --text: #23313f;
+  --muted: #6b7c8d;
+  --accent: #0b6bcb;
+  --accent-soft: #e8f1fc;
+  --good: #1a8a4a;
+  --warn: #b9760a;
+  --bad: #c62828;
+  --shadow: 0 1px 3px rgba(20, 35, 50, 0.10);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+/* --- Chrome --------------------------------------------------------- */
+
+.topbar {
+  background: var(--ink);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 18px;
+  height: 48px;
+  flex-wrap: wrap;
+}
+.topbar .brand {
+  font-weight: bold;
+  letter-spacing: 0.3px;
+  font-size: 15px;
+  color: #fff;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar nav { display: flex; gap: 4px; }
+.topbar nav a {
+  color: #b8c7d6;
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.topbar nav a:hover { background: var(--ink-2); color: #fff; }
+.topbar nav a.active { background: var(--accent); color: #fff; }
+.topbar .spacer { flex: 1; }
+.topbar .context { font-size: 13px; color: #9fb2c4; white-space: nowrap; }
+.topbar select {
+  background: var(--ink-2);
+  color: #fff;
+  border: 1px solid #38495c;
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+.wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
+
+h1.page-title { font-size: 21px; margin: 0 0 2px; }
+p.subtitle { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+section { margin-bottom: 26px; }
+h2.section-title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin: 0 0 10px;
+  font-weight: bold;
+}
+
+/* --- Panels & tiles -------------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.panel-pad { padding: 14px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  cursor: default;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.tile.clickable { cursor: pointer; }
+.tile.clickable:hover { border-color: var(--accent); transform: translateY(-1px); }
+.tile .num { font-size: 24px; font-weight: bold; line-height: 1.1; }
+.tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-top: 3px; }
+.tile .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.tile.good .num { color: var(--good); }
+.tile.warn .num { color: var(--warn); }
+.tile.bad .num { color: var(--bad); }
+
+/* --- Tables ---------------------------------------------------------- */
+
+table.grid { width: 100%; border-collapse: collapse; }
+table.grid th, table.grid td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef1f5;
+  text-align: left;
+  font-size: 13px;
+}
+table.grid th {
+  background: #f5f8fa;
+  color: var(--muted);
+  font-weight: bold;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+table.grid tbody tr { cursor: pointer; }
+table.grid tbody tr:hover { background: var(--accent-soft); }
+table.grid td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.grid td.path { word-break: break-all; }
+table.grid a { color: var(--accent); text-decoration: none; }
+table.grid a:hover { text-decoration: underline; }
+
+/* --- Badges ---------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  background: #eef2f6;
+  color: #4a5b6c;
+}
+.badge.good { background: #e6f4ec; color: var(--good); }
+.badge.warn { background: #fdf1de; color: var(--warn); }
+.badge.bad  { background: #fdeaea; color: var(--bad); }
+.delta-up { color: var(--bad); font-variant-numeric: tabular-nums; }
+.delta-down { color: var(--good); font-variant-numeric: tabular-nums; }
+.delta-flat { color: var(--muted); }
+
+/* --- Interactive graphics -------------------------------------------- */
+
+.chart { width: 100%; display: block; }
+.chart .node { cursor: pointer; transition: opacity 0.12s; }
+.chart .node:hover { opacity: 0.82; }
+.chart .node-label { pointer-events: none; fill: #fff; font-size: 11px; font-weight: bold; }
+.chart .node-sub { pointer-events: none; fill: rgba(255,255,255,0.82); font-size: 10px; }
+.chart .bar { cursor: pointer; }
+.chart .bar:hover { filter: brightness(1.12); }
+.chart .axis { fill: var(--muted); font-size: 11px; }
+.chart .dim { opacity: 0.15; }
+.chart .edge { fill: none; stroke: #b6c6d4; stroke-width: 1.5; transition: stroke 0.12s, stroke-width 0.12s; }
+.chart .edge.hot { stroke: var(--accent); stroke-width: 2.5; }
+.chart .gnode { cursor: pointer; }
+.chart .gnode text { font-size: 11px; fill: var(--text); }
+.chart .gnode:hover text { fill: var(--accent); font-weight: bold; }
+
+#tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 50;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 6px;
+  padding: 8px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 320px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.28);
+  display: none;
+}
+#tooltip .t-title { font-weight: bold; margin-bottom: 3px; word-break: break-all; }
+#tooltip .t-row { color: #c3d3e2; }
+#tooltip .t-hint { color: #8fa6bb; margin-top: 4px; font-style: italic; }
+
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.legend span.key { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .cols-2 { grid-template-columns: 1fr; } }
+
+.empty { color: var(--muted); padding: 14px; font-style: italic; }
+.note { color: var(--muted); font-size: 12px; margin-top: 8px; }
