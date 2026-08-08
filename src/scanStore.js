@@ -60,6 +60,152 @@ export function urlToScanPath(url) {
 
 const stripTrailingSlash = (url) => url.replace(/\/+$/, '');
 
+/** Collapses markup and whitespace inside an element's inner HTML. */
+const innerText = (html) => html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * Parses an HTML attribute string into a lowercase-keyed object.
+ * @param {string} attrString
+ * @returns {Record<string, string>}
+ */
+function parseAttrs(attrString) {
+    const attrs = {};
+    for (const m of attrString.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g)) {
+        attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+    }
+    return attrs;
+}
+
+/** Robots directives DeepScrape reports on. */
+const ROBOTS_DIRECTIVES = ['noindex', 'nofollow', 'none', 'noarchive', 'nosnippet', 'noimageindex', 'notranslate'];
+
+/**
+ * Extracts on-page SEO metadata from saved HTML: title, headings,
+ * meta description, robots directives, canonical and language.
+ *
+ * Note: only the *meta tag* is visible here — the HTTP `X-Robots-Tag`
+ * header is not captured at scrape time (see docs/16-page-seo.md).
+ *
+ * @param {string} html
+ * @returns {object}
+ */
+export function extractPageMeta(html) {
+    const metas = [...html.matchAll(/<meta\s([^>]*?)\/?>/gi)].map(m => parseAttrs(m[1]));
+    const links = [...html.matchAll(/<link\s([^>]*?)\/?>/gi)].map(m => parseAttrs(m[1]));
+
+    const metaByName = (name) => metas.find(m => (m.name ?? '').toLowerCase() === name)?.content ?? null;
+
+    const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+    const h1s = [...html.matchAll(/<h1[^>]*>([\s\S]*?)<\/h1>/gi)]
+        .map(m => innerText(m[1]))
+        .filter(Boolean);
+    const h2Count = [...html.matchAll(/<h2[\s>]/gi)].length;
+
+    const description = metaByName('description');
+
+    // robots + googlebot directives are merged; `none` implies noindex,nofollow.
+    const robotsRaw = metaByName('robots');
+    const googlebotRaw = metaByName('googlebot');
+    const tokens = [robotsRaw, googlebotRaw]
+        .filter(Boolean)
+        .flatMap(value => value.split(',').map(t => t.trim().toLowerCase()));
+
+    const robots = { raw: robotsRaw, googlebot: googlebotRaw, directives: [] };
+    for (const directive of ROBOTS_DIRECTIVES) {
+        const present = tokens.includes(directive) || (directive !== 'none' && tokens.includes('none') &&
+            (directive === 'noindex' || directive === 'nofollow'));
+        robots[directive === 'none' ? 'none' : directive] = present;
+        if (present && directive !== 'none') robots.directives.push(directive);
+    }
+
+    const canonical = links.find(l => (l.rel ?? '').toLowerCase() === 'canonical')?.href ?? null;
+
+    return {
+        title: title != null ? innerText(title) : null,
+        titleLength: title != null ? innerText(title).length : 0,
+        h1s,
+        h1Count: h1s.length,
+        h2Count,
+        description,
+        descriptionLength: description ? description.length : 0,
+        robots,
+        canonical,
+        lang: html.match(/<html\s([^>]*)>/i) ? parseAttrs(html.match(/<html\s([^>]*)>/i)[1]).lang ?? null : null,
+    };
+}
+
+/**
+ * Cross-references robots directives against the crawl's link graph:
+ * a noindex page that other pages still link to is reachable but
+ * excluded from search — the case worth surfacing.
+ *
+ * @param {object} meta - Result of extractPageMeta().
+ * @param {object[]} incoming - Detailed incoming links.
+ * @param {object[]} internalOut - Detailed internal outgoing links.
+ * @param {string|null} url - This page's URL.
+ * @returns {object}
+ */
+export function assessDiscoverability(meta, incoming, internalOut, url) {
+    const inboundFollowed = incoming.filter(i => !i.nofollow).length;
+    const inboundNofollow = incoming.length - inboundFollowed;
+
+    const indexable = !meta.robots.noindex;
+    const canonicalisedAway = !!(meta.canonical && url &&
+        stripTrailingSlash(meta.canonical) !== stripTrailingSlash(url));
+
+    let status;
+    if (!indexable && inboundFollowed > 0) status = 'noindex-but-linked';
+    else if (!indexable) status = 'noindex';
+    else if (canonicalisedAway) status = 'canonicalised-away';
+    else if (incoming.length === 0) status = 'orphan';
+    else if (inboundFollowed === 0) status = 'nofollow-links-only';
+    else status = 'indexable-and-linked';
+
+    const notes = [];
+    if (!indexable && inboundFollowed > 0) {
+        notes.push(`Excluded from search by meta robots noindex, but still reachable — ${inboundFollowed} followed internal link${inboundFollowed === 1 ? ' points' : 's point'} here.`);
+    }
+    if (!indexable && inboundFollowed === 0 && inboundNofollow > 0) {
+        notes.push(`noindex, and the only ${inboundNofollow} internal link${inboundNofollow === 1 ? '' : 's'} pointing here ${inboundNofollow === 1 ? 'is' : 'are'} nofollow.`);
+    }
+    if (indexable && incoming.length === 0) {
+        notes.push('Orphan: no page in this scan links here, so crawlers can only find it via a sitemap or external link.');
+    }
+    if (indexable && incoming.length > 0 && inboundFollowed === 0) {
+        notes.push(`Every one of the ${incoming.length} internal links pointing here is nofollow — link equity is not passed.`);
+    }
+    if (meta.robots.nofollow && internalOut.length > 0) {
+        notes.push(`meta robots nofollow: the ${internalOut.length} internal link${internalOut.length === 1 ? '' : 's'} on this page are not followed.`);
+    }
+    if (canonicalisedAway) {
+        notes.push(`Canonical points elsewhere (${meta.canonical}) — this URL is not the indexed version.`);
+    }
+    if (meta.h1Count === 0) notes.push('No H1 heading.');
+    if (meta.h1Count > 1) notes.push(`${meta.h1Count} H1 headings — expected one.`);
+    if (!meta.description) notes.push('No meta description.');
+    else if (meta.descriptionLength > 160) notes.push(`Meta description is ${meta.descriptionLength} characters — likely truncated in results.`);
+    else if (meta.descriptionLength < 50) notes.push(`Meta description is only ${meta.descriptionLength} characters.`);
+    if (!meta.title) notes.push('No <title>.');
+
+    return {
+        status,
+        indexable,
+        followable: !meta.robots.nofollow,
+        canonicalisedAway,
+        inboundTotal: incoming.length,
+        inboundFollowed,
+        inboundNofollow,
+        internalOutgoing: internalOut.length,
+        notes,
+        // Only the meta tag is observable in saved HTML.
+        headerRobotsChecked: false,
+    };
+}
+
 /**
  * Reads the original URL from a saved page (first line: <!-- url -->).
  * @param {string} filePath
@@ -181,6 +327,14 @@ export async function getPageDetails(scanPath, scan, pagePath) {
     const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url);
     const incomingDetailed = await analyzeIncoming(scanPath, scan, url);
 
+    let meta = null;
+    try {
+        meta = extractPageMeta(await fs.readFile(absPage, 'utf8'));
+    } catch { /* unreadable page */ }
+    const discoverability = meta
+        ? assessDiscoverability(meta, incomingDetailed, links.internal, url)
+        : null;
+
     return {
         scan,
         path: pagePath,
@@ -189,6 +343,8 @@ export async function getPageDetails(scanPath, scan, pagePath) {
         modified: stat.mtime.toISOString(),
         htmlUrl: `/output/${scan}/${pagePath}`,
         screenshotUrl: hasScreenshot ? `/output/${scan}/${webpRel}` : null,
+        meta,
+        discoverability,
         // Plain URL lists kept for callers that only need counts.
         incoming: incomingDetailed.map(i => i.url),
         outgoing: [...links.internal.map(l => l.url), ...links.external.map(l => l.url)],

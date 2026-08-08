@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
     buildScanTree, getPageDetails, getPageHistory, readPageUrl,
-    extractAnchors, urlToScanPath,
+    extractAnchors, urlToScanPath, extractPageMeta, assessDiscoverability,
 } from '../src/scanStore.js';
 
 let root;        // temp output/<domain>
@@ -36,7 +36,14 @@ beforeAll(async () => {
         + '<a href="https://cdn.example/asset">CDN</a>'
         + '</html>');
     await write(scanB, 'bank.example/index.webp', 'webp-bytes');
-    await write(scanB, 'bank.example/loans/personal.html', '<!-- https://bank.example/loans/personal -->\n<html>p</html>');
+    // noindex page that other pages still link to — the conflict case.
+    await write(scanB, 'bank.example/loans/personal.html',
+        '<!-- https://bank.example/loans/personal -->\n'
+        + '<html lang="en-GB"><head><title>Personal loans | Bank</title>'
+        + '<meta name="description" content="Compare our personal loan rates and apply online in minutes with a decision in principle.">'
+        + '<meta name="robots" content="noindex, follow">'
+        + '<link rel="canonical" href="https://bank.example/loans/personal">'
+        + '</head><body><h1>Personal loans</h1></body></html>');
     await write(scanB, 'bank.example/loans/mortgages/fixed.html', '<!-- https://bank.example/loans/mortgages/fixed -->\n<html>f</html>');
     await write(scanB, 'bank.example/images/logo.png', 'png');
     await write(scanB, 'all-links.txt', 'https://bank.example/a\nhttps://bank.example/b');
@@ -167,6 +174,134 @@ describe('getPageDetails', () => {
     it('returns null for missing pages', async () => {
         const d = await getPageDetails(scanB, 'x', 'bank.example/nope.html');
         expect(d).toBeNull();
+    });
+});
+
+describe('extractPageMeta', () => {
+    it('extracts title, h1s, description, canonical and lang', () => {
+        const meta = extractPageMeta(
+            '<html lang="en"><head><title> Home &nbsp; page </title>'
+            + '<meta name="description" content="A description.">'
+            + '<link rel="canonical" href="https://x.example/">'
+            + '</head><body><h1><span>Main</span> heading</h1><h2>a</h2><h2>b</h2></body></html>');
+
+        expect(meta.title).toBe('Home page');
+        expect(meta.h1s).toEqual(['Main heading']);
+        expect(meta.h1Count).toBe(1);
+        expect(meta.h2Count).toBe(2);
+        expect(meta.description).toBe('A description.');
+        expect(meta.descriptionLength).toBe(14);
+        expect(meta.canonical).toBe('https://x.example/');
+        expect(meta.lang).toBe('en');
+    });
+
+    it('reports multiple and missing H1s', () => {
+        expect(extractPageMeta('<h1>One</h1><h1>Two</h1>').h1Count).toBe(2);
+        const none = extractPageMeta('<html><body><p>no headings</p></body></html>');
+        expect(none.h1Count).toBe(0);
+        expect(none.title).toBeNull();
+        expect(none.description).toBeNull();
+    });
+
+    it('parses robots directives regardless of attribute order or case', () => {
+        const meta = extractPageMeta('<meta content="NoIndex, NoFollow" name="ROBOTS">');
+        expect(meta.robots.noindex).toBe(true);
+        expect(meta.robots.nofollow).toBe(true);
+        expect(meta.robots.directives).toEqual(['noindex', 'nofollow']);
+    });
+
+    it('treats robots "none" as noindex + nofollow and merges googlebot', () => {
+        const meta = extractPageMeta('<meta name="robots" content="none"><meta name="googlebot" content="noarchive">');
+        expect(meta.robots.noindex).toBe(true);
+        expect(meta.robots.nofollow).toBe(true);
+        expect(meta.robots.noarchive).toBe(true);
+    });
+
+    it('defaults to indexable when no robots meta is present', () => {
+        const meta = extractPageMeta('<html><head><title>t</title></head></html>');
+        expect(meta.robots.noindex).toBe(false);
+        expect(meta.robots.directives).toEqual([]);
+    });
+});
+
+describe('assessDiscoverability', () => {
+    const baseMeta = (overrides = {}) => ({
+        title: 'T', h1s: ['H'], h1Count: 1, h2Count: 0,
+        description: 'x'.repeat(80), descriptionLength: 80,
+        canonical: null, lang: 'en',
+        robots: { raw: null, googlebot: null, directives: [], noindex: false, nofollow: false },
+        ...overrides,
+    });
+
+    it('flags a noindex page that internal links still reach', () => {
+        const meta = baseMeta({ robots: { directives: ['noindex'], noindex: true, nofollow: false } });
+        const d = assessDiscoverability(meta, [{ nofollow: false }, { nofollow: false }], [], 'https://x.example/p');
+
+        expect(d.status).toBe('noindex-but-linked');
+        expect(d.indexable).toBe(false);
+        expect(d.inboundFollowed).toBe(2);
+        expect(d.notes[0]).toMatch(/still reachable — 2 followed internal links point here/);
+    });
+
+    it('calls an indexable page with no inbound links an orphan', () => {
+        const d = assessDiscoverability(baseMeta(), [], [], 'https://x.example/p');
+        expect(d.status).toBe('orphan');
+        expect(d.notes.some(n => n.startsWith('Orphan'))).toBe(true);
+    });
+
+    it('flags pages reachable only via nofollow links', () => {
+        const d = assessDiscoverability(baseMeta(), [{ nofollow: true }], [], 'https://x.example/p');
+        expect(d.status).toBe('nofollow-links-only');
+        expect(d.inboundFollowed).toBe(0);
+        expect(d.inboundNofollow).toBe(1);
+    });
+
+    it('flags meta nofollow wasting the page outgoing links', () => {
+        const meta = baseMeta({ robots: { directives: ['nofollow'], noindex: false, nofollow: true } });
+        const d = assessDiscoverability(meta, [{ nofollow: false }], [{}, {}, {}], 'https://x.example/p');
+        expect(d.followable).toBe(false);
+        expect(d.notes.some(n => n.includes('3 internal links on this page are not followed'))).toBe(true);
+    });
+
+    it('detects a canonical pointing at another URL', () => {
+        const meta = baseMeta({ canonical: 'https://x.example/other' });
+        const d = assessDiscoverability(meta, [{ nofollow: false }], [], 'https://x.example/p');
+        expect(d.status).toBe('canonicalised-away');
+        expect(d.canonicalisedAway).toBe(true);
+    });
+
+    it('treats a self-referencing canonical as fine (trailing slash tolerant)', () => {
+        const meta = baseMeta({ canonical: 'https://x.example/p/' });
+        const d = assessDiscoverability(meta, [{ nofollow: false }], [], 'https://x.example/p');
+        expect(d.canonicalisedAway).toBe(false);
+        expect(d.status).toBe('indexable-and-linked');
+    });
+
+    it('notes missing H1, description and title problems', () => {
+        const meta = baseMeta({ h1s: [], h1Count: 0, description: null, descriptionLength: 0, title: null });
+        const d = assessDiscoverability(meta, [{ nofollow: false }], [], 'https://x.example/p');
+        expect(d.notes).toContain('No H1 heading.');
+        expect(d.notes).toContain('No meta description.');
+        expect(d.notes).toContain('No <title>.');
+    });
+});
+
+describe('getPageDetails metadata', () => {
+    it('returns meta and discoverability for a saved page', async () => {
+        const d = await getPageDetails(scanB, 'bank.example/2026-08-08', 'bank.example/loans/personal.html');
+
+        expect(d.meta.title).toBe('Personal loans | Bank');
+        expect(d.meta.h1s).toEqual(['Personal loans']);
+        expect(d.meta.description).toMatch(/^Compare our personal loan rates/);
+        expect(d.meta.lang).toBe('en-GB');
+        expect(d.meta.robots.noindex).toBe(true);
+        expect(d.meta.robots.nofollow).toBe(false);
+
+        // Linked from the index page, yet noindex — the conflict we care about.
+        expect(d.discoverability.status).toBe('noindex-but-linked');
+        expect(d.discoverability.inboundFollowed).toBe(1);
+        expect(d.discoverability.canonicalisedAway).toBe(false);
+        expect(d.discoverability.headerRobotsChecked).toBe(false);
     });
 });
 

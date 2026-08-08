@@ -145,6 +145,34 @@
     .empty { color: #999; padding: 12px; }
     .note { color: #888; font-size: 12px; margin-top: 8px; }
 
+    /* SEO / metadata panel */
+    .seo { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 0; overflow: hidden; }
+    .seo-status {
+      padding: 10px 14px; font-size: 14px; font-weight: bold;
+      border-bottom: 1px solid #eee;
+    }
+    .s-good { background: #e9f7e9; color: #1a7a1a; }
+    .s-warn { background: #fff6e0; color: #8a6100; }
+    .s-bad  { background: #fdecec; color: #c00; }
+    table.meta { width: 100%; border-collapse: collapse; }
+    table.meta th, table.meta td {
+      padding: 9px 14px; border-bottom: 1px solid #f0f0f0;
+      text-align: left; font-size: 13px; vertical-align: top;
+    }
+    table.meta th { width: 165px; color: #667; font-weight: normal; white-space: nowrap; }
+    table.meta td { color: #234; word-break: break-word; }
+    .meta-missing { color: #c00; font-style: italic; }
+    .meta-value { font-weight: bold; }
+    .charcount { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
+    .directive {
+      display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px;
+      margin-right: 4px; background: #fdecec; color: #c00; font-weight: bold;
+    }
+    .directive.ok { background: #e9f7e9; color: #1a7a1a; }
+    .notes { margin: 0; padding: 10px 14px 12px 32px; font-size: 13px; }
+    .notes li { margin-bottom: 5px; color: #444; }
+    .caveat { padding: 8px 14px 12px; font-size: 12px; color: #888; }
+
     /* Re-scan panel */
     .rescan {
       background: #fff; border: 1px solid #ddd; border-radius: 8px;
@@ -366,11 +394,135 @@
       }
       content.appendChild(histSection);
 
+      // On-page metadata and discoverability
+      if (page.meta) content.appendChild(renderSeo(page));
+
       // Re-scan this single page (priority job)
       content.appendChild(renderRescan(page));
 
       // Link analysis
       content.appendChild(renderLinks(page.links));
+    }
+
+    // --- On-page metadata & discoverability ------------------------------
+
+    const STATUS_LABELS = {
+      "indexable-and-linked": ["s-good", "✅ Indexable and linked internally"],
+      "noindex-but-linked": ["s-bad", "🚫 noindex — but still reachable via internal links"],
+      "noindex": ["s-warn", "🚫 noindex — excluded from search"],
+      "canonicalised-away": ["s-warn", "↪️ Canonical points to another URL"],
+      "orphan": ["s-warn", "🔗 Orphan — nothing in this scan links here"],
+      "nofollow-links-only": ["s-warn", "⚠️ Only nofollow links point here"],
+    };
+
+    function metaRow(table, label, valueNode) {
+      const tr = el("tr");
+      tr.appendChild(el("th", null, label));
+      const td = el("td");
+      td.appendChild(valueNode);
+      tr.appendChild(td);
+      table.appendChild(tr);
+    }
+
+    function valueOrMissing(value, missingText, charLimit) {
+      if (!value) return el("span", "meta-missing", missingText);
+      const span = el("span", "meta-value", value);
+      const wrap = el("span");
+      wrap.appendChild(span);
+      if (charLimit) {
+        const count = el("span", "charcount", `${value.length} chars`);
+        wrap.appendChild(count);
+      }
+      return wrap;
+    }
+
+    function renderSeo(page) {
+      const meta = page.meta;
+      const disc = page.discoverability;
+
+      const section = el("section");
+      section.appendChild(el("h2", null, "Metadata & discoverability"));
+
+      const box = el("div", "seo");
+
+      const [cls, label] = STATUS_LABELS[disc.status] ?? ["s-warn", disc.status];
+      box.appendChild(el("div", `seo-status ${cls}`, label));
+
+      const table = el("table", "meta");
+
+      metaRow(table, "Title", valueOrMissing(meta.title, "missing", true));
+
+      // H1s — zero or several is worth seeing at a glance.
+      const h1Cell = el("span");
+      if (meta.h1Count === 0) {
+        h1Cell.appendChild(el("span", "meta-missing", "missing"));
+      } else {
+        meta.h1s.forEach((h1, i) => {
+          if (i > 0) h1Cell.appendChild(el("br"));
+          h1Cell.appendChild(el("span", "meta-value", h1));
+        });
+        if (meta.h1Count > 1) {
+          h1Cell.appendChild(el("span", "charcount", `${meta.h1Count} H1s — expected one`));
+        }
+      }
+      metaRow(table, `H1${meta.h1Count > 1 ? ` (${meta.h1Count})` : ""}`, h1Cell);
+
+      metaRow(table, "Meta description", valueOrMissing(meta.description, "missing", true));
+
+      // Robots directives from meta robots / googlebot.
+      const robotsCell = el("span");
+      if (meta.robots.directives.length === 0) {
+        robotsCell.appendChild(el("span", "directive ok", "index, follow (default)"));
+      } else {
+        for (const directive of meta.robots.directives) {
+          robotsCell.appendChild(el("span", "directive", directive));
+        }
+      }
+      if (meta.robots.raw) robotsCell.appendChild(el("span", "charcount", `robots: "${meta.robots.raw}"`));
+      if (meta.robots.googlebot) robotsCell.appendChild(el("span", "charcount", `googlebot: "${meta.robots.googlebot}"`));
+      metaRow(table, "Robots", robotsCell);
+
+      // Canonical
+      const canonCell = el("span");
+      if (!meta.canonical) {
+        canonCell.appendChild(el("span", "meta-missing", "none"));
+      } else {
+        const a = el("a", null, meta.canonical);
+        a.href = meta.canonical;
+        a.target = "_blank";
+        a.rel = "noopener";
+        canonCell.appendChild(a);
+        canonCell.appendChild(el("span", "charcount",
+          disc.canonicalisedAway ? "points elsewhere" : "self-referencing"));
+      }
+      metaRow(table, "Canonical", canonCell);
+
+      metaRow(table, "Language", meta.lang
+        ? el("span", "meta-value", meta.lang)
+        : el("span", "meta-missing", "not set"));
+
+      // Discoverability summary from the crawl's link graph.
+      const reach = el("span");
+      reach.appendChild(el("span", "meta-value",
+        `${disc.inboundFollowed} followed`));
+      reach.append(` internal link${disc.inboundFollowed === 1 ? "" : "s"} in`);
+      if (disc.inboundNofollow > 0) reach.append(` (+${disc.inboundNofollow} nofollow)`);
+      reach.append(` · ${disc.internalOutgoing} internal out`);
+      metaRow(table, "Internal reach", reach);
+
+      box.appendChild(table);
+
+      if (disc.notes.length) {
+        const notes = el("ul", "notes");
+        for (const note of disc.notes) notes.appendChild(el("li", null, note));
+        box.appendChild(notes);
+      }
+
+      box.appendChild(el("div", "caveat",
+        "Based on the saved HTML: meta robots only. The HTTP X-Robots-Tag header is not captured at scrape time, so a header-level noindex would not appear here."));
+
+      section.appendChild(box);
+      return section;
     }
 
     // --- Re-scan ---------------------------------------------------------
