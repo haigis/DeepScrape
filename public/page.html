@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DeepScrape — Page Detail</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #f7f7f7;
+      margin: 0;
+      color: #333;
+    }
+    header {
+      background: #007bff;
+      color: white;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    header a { color: #cfe5ff; text-decoration: none; font-size: 14px; }
+    header a:hover { text-decoration: underline; }
+    header h1 { font-size: 16px; margin: 0; font-weight: normal; word-break: break-all; }
+
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+
+    .top { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+    .info { flex: 1; min-width: 300px; }
+
+    .page-title { font-size: 20px; font-weight: bold; color: #234; word-break: break-all; margin: 0 0 6px; }
+    .orig-url { font-size: 14px; margin-bottom: 14px; word-break: break-all; }
+    .orig-url a { color: #007bff; text-decoration: none; }
+    .orig-url a:hover { text-decoration: underline; }
+
+    .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .stat {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 10px 16px;
+      min-width: 100px;
+      text-align: center;
+    }
+    .stat .num { font-size: 20px; font-weight: bold; color: #007bff; }
+    .stat .label { font-size: 12px; color: #667; }
+
+    .actions { margin-bottom: 16px; }
+    .actions a {
+      display: inline-block;
+      margin: 0 8px 8px 0;
+      background: #007bff;
+      border-radius: 5px;
+      padding: 8px 14px;
+      color: white;
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .actions a.secondary { background: #fff; color: #007bff; border: 1px solid #cfe0f0; }
+    .actions a:hover { opacity: 0.9; }
+
+    .shot {
+      width: 340px;
+      max-width: 100%;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background: #fafafa;
+      cursor: zoom-in;
+      object-fit: cover;
+      object-position: top;
+      max-height: 420px;
+    }
+
+    section { margin-top: 26px; }
+    section h2 { font-size: 16px; color: #234; margin: 0 0 10px; }
+
+    table.history {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.06);
+    }
+    table.history th, table.history td {
+      padding: 9px 12px;
+      border-bottom: 1px solid #eee;
+      text-align: left;
+      font-size: 14px;
+    }
+    table.history th { background: #f0f4f8; color: #234; }
+    table.history a { color: #007bff; text-decoration: none; font-weight: bold; }
+    table.history a:hover { text-decoration: underline; }
+    tr.current { background: #eef5ff; }
+    .delta-up { color: #d60000; }
+    .delta-down { color: #1a8a1a; }
+    .delta-none { color: #999; }
+
+    .linkbox {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+    .linkbox a { color: #007bff; text-decoration: none; display: block; word-break: break-all; }
+    .linkbox a:hover { text-decoration: underline; }
+    .linkbox .empty { color: #999; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+
+    #lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      z-index: 10;
+      justify-content: center;
+      align-items: flex-start;
+      overflow-y: auto;
+      padding: 30px;
+      cursor: zoom-out;
+    }
+    #lightbox img { max-width: 95%; border-radius: 6px; box-shadow: 0 4px 30px rgba(0,0,0,0.5); }
+    .placeholder { color: #888; text-align: center; margin-top: 60px; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <a href="/scans.html">← All scans</a>
+    <h1 id="crumb">Loading…</h1>
+  </header>
+
+  <div class="wrap" id="content">
+    <p class="placeholder">Loading page details…</p>
+  </div>
+
+  <div id="lightbox" onclick="this.style.display='none'"><img id="lightboxImg" alt="Screenshot preview"></div>
+
+  <script>
+    const API_URL = "";
+    const params = new URLSearchParams(location.search);
+    const scan = params.get("scan") || "";
+    const pagePath = params.get("path") || "";
+    const [domain, scanDate] = scan.split("/");
+
+    const fmtSize = (bytes) => {
+      if (bytes == null) return "—";
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      return (bytes / 1024 / 1024).toFixed(2) + " MB";
+    };
+
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    };
+
+    async function load() {
+      const content = document.getElementById("content");
+      if (!scan || !pagePath || !domain || !scanDate) {
+        content.innerHTML = "";
+        content.appendChild(el("p", "placeholder", "Missing scan or path parameter."));
+        return;
+      }
+
+      document.getElementById("crumb").textContent = `${domain} · ${scanDate}`;
+
+      try {
+        const [pageRes, histRes] = await Promise.all([
+          fetch(`${API_URL}/scan/page?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(pagePath)}`),
+          fetch(`${API_URL}/scan/history?domain=${encodeURIComponent(domain)}&path=${encodeURIComponent(pagePath)}`),
+        ]);
+        if (!pageRes.ok) {
+          const err = await pageRes.json().catch(() => ({}));
+          throw new Error(err.error || "Failed to load page");
+        }
+        const page = await pageRes.json();
+        const hist = histRes.ok ? (await histRes.json()).history : [];
+        render(page, hist);
+      } catch (error) {
+        content.innerHTML = "";
+        content.appendChild(el("p", "placeholder", "Error: " + error.message));
+      }
+    }
+
+    function render(page, history) {
+      const content = document.getElementById("content");
+      content.innerHTML = "";
+
+      const top = el("div", "top");
+      const info = el("div", "info");
+
+      // Display path relative to the site root (strip the domain folder).
+      const displayPath = "/" + page.path.split("/").slice(1).join("/");
+      info.appendChild(el("p", "page-title", displayPath));
+
+      const orig = el("p", "orig-url");
+      if (page.url) {
+        orig.append("Original URL: ");
+        const a = el("a", null, page.url);
+        a.href = page.url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        orig.appendChild(a);
+      } else {
+        orig.textContent = "Original URL: unknown";
+      }
+      info.appendChild(orig);
+
+      // Stats
+      const stats = el("div", "stats");
+      const defs = [
+        [fmtSize(page.size), "HTML size"],
+        [page.incoming.length, "Incoming links"],
+        [page.outgoing.length, "Outgoing links"],
+        [history.length, "Scans"],
+      ];
+      for (const [num, label] of defs) {
+        const s = el("div", "stat");
+        s.appendChild(el("div", "num", num));
+        s.appendChild(el("div", "label", label));
+        stats.appendChild(s);
+      }
+      info.appendChild(stats);
+
+      // Actions
+      const actions = el("div", "actions");
+      const aHtml = el("a", null, "View saved HTML");
+      aHtml.href = page.htmlUrl;
+      aHtml.target = "_blank";
+      actions.appendChild(aHtml);
+      if (page.screenshotUrl) {
+        const aShot = el("a", "secondary", "Open screenshot");
+        aShot.href = page.screenshotUrl;
+        aShot.target = "_blank";
+        actions.appendChild(aShot);
+      }
+      info.appendChild(actions);
+      top.appendChild(info);
+
+      if (page.screenshotUrl) {
+        const img = el("img", "shot");
+        img.src = page.screenshotUrl;
+        img.alt = "Screenshot of " + displayPath;
+        img.onclick = () => {
+          document.getElementById("lightboxImg").src = page.screenshotUrl;
+          document.getElementById("lightbox").style.display = "flex";
+        };
+        top.appendChild(img);
+      }
+      content.appendChild(top);
+
+      // History across scans
+      const histSection = el("section");
+      histSection.appendChild(el("h2", null, `Scan history (${history.length})`));
+      if (history.length === 0) {
+        histSection.appendChild(el("p", null, "No other scans contain this page."));
+      } else {
+        const table = el("table", "history");
+        const headRow = el("tr");
+        for (const h of ["Scan date", "HTML size", "Change", "Links", ""]) {
+          headRow.appendChild(el("th", null, h));
+        }
+        table.appendChild(headRow);
+
+        for (const entry of history) {
+          const row = el("tr", entry.scan === scan ? "current" : null);
+          row.appendChild(el("td", null, entry.date + (entry.scan === scan ? " (viewing)" : "")));
+          row.appendChild(el("td", null, fmtSize(entry.size)));
+
+          const deltaTd = el("td");
+          if (entry.sizeDelta == null) {
+            deltaTd.appendChild(el("span", "delta-none", "first scan"));
+          } else if (entry.sizeDelta === 0) {
+            deltaTd.appendChild(el("span", "delta-none", "no change"));
+          } else {
+            const cls = entry.sizeDelta > 0 ? "delta-up" : "delta-down";
+            const sign = entry.sizeDelta > 0 ? "+" : "−";
+            deltaTd.appendChild(el("span", cls, sign + fmtSize(Math.abs(entry.sizeDelta))));
+          }
+          row.appendChild(deltaTd);
+
+          const linksTd = el("td");
+          const aH = el("a", null, "HTML");
+          aH.href = entry.htmlUrl;
+          aH.target = "_blank";
+          linksTd.appendChild(aH);
+          if (entry.screenshotUrl) {
+            linksTd.append(" · ");
+            const aS = el("a", null, "Screenshot");
+            aS.href = entry.screenshotUrl;
+            aS.target = "_blank";
+            linksTd.appendChild(aS);
+          }
+          row.appendChild(linksTd);
+
+          const viewTd = el("td");
+          if (entry.scan !== scan) {
+            const aV = el("a", null, "View this scan →");
+            aV.href = `/page.html?scan=${encodeURIComponent(entry.scan)}&path=${encodeURIComponent(pagePath)}`;
+            viewTd.appendChild(aV);
+          }
+          row.appendChild(viewTd);
+
+          table.appendChild(row);
+        }
+        histSection.appendChild(table);
+      }
+      content.appendChild(histSection);
+
+      // Incoming / outgoing links
+      const cols = el("div", "cols");
+      cols.appendChild(linkList(`Incoming links (${page.incoming.length})`,
+        page.incoming, "No crawl data — incoming links are recorded by spider scans."));
+      cols.appendChild(linkList(`Outgoing links (${page.outgoing.length})`,
+        page.outgoing, "No outgoing links found."));
+      const linkSection = el("section");
+      linkSection.appendChild(cols);
+      content.appendChild(linkSection);
+    }
+
+    function linkList(title, urls, emptyText) {
+      const wrap = el("div");
+      wrap.appendChild(el("h2", null, title));
+      const box = el("div", "linkbox");
+      if (urls.length === 0) {
+        box.appendChild(el("span", "empty", emptyText));
+      } else {
+        for (const url of urls.slice(0, 200)) {
+          const a = el("a", null, url);
+          a.href = url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          box.appendChild(a);
+        }
+        if (urls.length > 200) {
+          box.appendChild(el("span", "empty", `…and ${urls.length - 200} more`));
+        }
+      }
+      wrap.appendChild(box);
+      return wrap;
+    }
+
+    load();
+  </script>
+</body>
+</html>

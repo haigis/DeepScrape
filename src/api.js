@@ -7,6 +7,7 @@ import { fetchSitemapUrls } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs } from './jobs.js';
+import { buildScanTree, getPageDetails, getPageHistory } from './scanStore.js';
 
 const app = express();
 
@@ -243,6 +244,95 @@ app.get('/scan/all', (req, res) => {
       .map(f => `${scan}/${f}`);
 
     res.json({ scan, files });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /scan/tree?scan=<domain>/<date>
+ * Server-built directory tree of a scan's pages with aggregate stats.
+ * Scales to thousands of pages: the client renders collapsed folders
+ * with counts instead of a flat file list.
+ */
+app.get('/scan/tree', async (req, res) => {
+  const scan = req.query.scan;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  try {
+    const { tree, stats } = await buildScanTree(scanPath);
+    res.json({ scan, stats, tree });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Validates a page path (relative, no traversal) inside a scan directory.
+ * @returns {string|null} - Normalized relative path or null.
+ */
+function resolvePagePath(scanPath, pagePath) {
+  if (!pagePath || typeof pagePath !== 'string') return null;
+  const abs = path.resolve(scanPath, pagePath);
+  if (!abs.startsWith(scanPath + path.sep)) return null;
+  return path.relative(scanPath, abs).replace(/\\/g, '/');
+}
+
+/**
+ * GET /scan/page?scan=<domain>/<date>&path=<page path>
+ * Bespoke per-page detail: original URL, size, screenshot,
+ * incoming links (spider scans) and outgoing links.
+ */
+app.get('/scan/page', async (req, res) => {
+  const { scan, path: pagePath } = req.query;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+
+  const rel = resolvePagePath(scanPath, pagePath);
+  if (!rel) return res.status(400).json({ error: 'Invalid page path' });
+
+  try {
+    const details = await getPageDetails(scanPath, scan, rel);
+    if (!details) return res.status(404).json({ error: 'Page not found in scan' });
+    res.json(details);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /scan/history?domain=<domain>&path=<page path>
+ * All scans of a domain containing the page, newest first, with
+ * size deltas — powers the "previous scans" view.
+ */
+app.get('/scan/history', async (req, res) => {
+  const { domain, path: pagePath } = req.query;
+  if (!domain || typeof domain !== 'string') {
+    return res.status(400).json({ error: 'Domain parameter is required' });
+  }
+
+  const domainRoot = resolveScanPath(domain);
+  if (!domainRoot) return res.status(400).json({ error: 'Invalid domain' });
+
+  // The page path is later joined under domainRoot/<date>/; validate it
+  // against a representative base so traversal cannot escape.
+  const probeBase = path.join(domainRoot, 'date');
+  const cleanRel = resolvePagePath(probeBase, pagePath);
+  if (!cleanRel) return res.status(400).json({ error: 'Invalid page path' });
+
+  try {
+    const history = await getPageHistory(domainRoot, domain, cleanRel);
+    res.json({ domain, path: cleanRel, history });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

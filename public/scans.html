@@ -126,34 +126,49 @@
     }
     .artifacts a:hover { background: #eef5ff; }
 
-    table.pages {
+    /* Page tree */
+    #pageFilter {
       width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.06);
-    }
-    table.pages th, table.pages td {
-      padding: 10px 12px;
-      border-bottom: 1px solid #eee;
-      text-align: left;
-      font-size: 14px;
-      vertical-align: middle;
-    }
-    table.pages th { background: #f0f4f8; color: #234; }
-    table.pages a { color: #007bff; text-decoration: none; font-weight: bold; }
-    table.pages a:hover { text-decoration: underline; }
-    .thumb {
-      width: 120px;
-      height: 68px;
-      object-fit: cover;
-      object-position: top;
+      padding: 8px;
       border: 1px solid #ccc;
-      border-radius: 4px;
-      background: #fafafa;
-      cursor: pointer;
+      border-radius: 5px;
+      font-size: 14px;
+      margin-bottom: 10px;
     }
+    .tree {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 10px 14px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.06);
+      font-size: 14px;
+      line-height: 1.9;
+    }
+    .tree details { padding-left: 18px; }
+    .tree > details { padding-left: 0; }
+    .tree summary {
+      cursor: pointer;
+      font-weight: bold;
+      color: #234;
+      list-style-position: outside;
+      user-select: none;
+    }
+    .tree summary:hover { color: #007bff; }
+    .tree summary .count {
+      font-weight: normal;
+      font-size: 12px;
+      color: #667;
+      background: #f0f4f8;
+      border-radius: 10px;
+      padding: 1px 8px;
+      margin-left: 6px;
+    }
+    .tree .page-row { padding-left: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tree > .page-row { padding-left: 0; }
+    .tree .page-row a { color: #007bff; text-decoration: none; }
+    .tree .page-row a:hover { text-decoration: underline; }
+    .page-icon { margin-right: 4px; }
+    .result-count { color: #667; font-size: 13px; margin: 4px 0 8px; }
     .muted { color: #aaa; font-weight: normal; }
 
     /* Lightbox for screenshot preview */
@@ -277,6 +292,9 @@
       }
     }
 
+    /** Tree data of the currently selected scan (for the filter box). */
+    let currentTree = null;
+
     async function selectScan(domain, date) {
       activeScan = `${domain}/${date}`;
       expanded.add(domain);
@@ -286,10 +304,10 @@
       main.innerHTML = `<p class="placeholder">Loading ${activeScan}…</p>`;
 
       try {
-        const response = await fetch(`${API_URL}/scan/all?scan=${encodeURIComponent(activeScan)}`);
-        if (!response.ok) throw new Error("Failed to fetch scan files");
+        const response = await fetch(`${API_URL}/scan/tree?scan=${encodeURIComponent(activeScan)}`);
+        if (!response.ok) throw new Error("Failed to fetch scan tree");
         const data = await response.json();
-        renderScan(domain, date, data.files || []);
+        renderScan(domain, date, data);
       } catch (error) {
         main.innerHTML = "";
         const p = document.createElement("p");
@@ -299,15 +317,10 @@
       }
     }
 
-    function renderScan(domain, date, files) {
+    function renderScan(domain, date, data) {
       const main = document.getElementById("mainPanel");
       main.innerHTML = "";
-
-      const webps = new Set(files.filter(f => f.endsWith(".webp")));
-      const htmlPages = files.filter(f => f.endsWith(".html"));
-      const images = files.filter(f => /\/images\//.test(f));
-      const artifactNames = ["all-links.txt", "broken-links.txt", "incoming-links.json"];
-      const artifacts = files.filter(f => artifactNames.includes(f.split("/").pop()));
+      currentTree = data.tree;
 
       // Header
       const headerDiv = document.createElement("div");
@@ -324,10 +337,10 @@
       const stats = document.createElement("div");
       stats.className = "stats";
       const statDefs = [
-        [htmlPages.length, "Pages"],
-        [webps.size, "Screenshots"],
-        [images.length, "Images"],
-        [artifacts.length, "Crawl artifacts"],
+        [data.stats.pages, "Pages"],
+        [data.stats.screenshots, "Screenshots"],
+        [data.stats.images, "Images"],
+        [data.stats.brokenLinks, "Broken links"],
       ];
       for (const [num, label] of statDefs) {
         const s = document.createElement("div");
@@ -340,12 +353,12 @@
       main.appendChild(stats);
 
       // Spider artifacts
-      if (artifacts.length) {
+      if (data.stats.artifacts.length) {
         const art = document.createElement("div");
         art.className = "artifacts";
-        for (const f of artifacts) {
+        for (const f of data.stats.artifacts) {
           const a = document.createElement("a");
-          a.href = `/output/${f}`;
+          a.href = `/output/${activeScan}/${f}`;
           a.target = "_blank";
           a.textContent = "🗂 " + f.split("/").pop();
           art.appendChild(a);
@@ -353,8 +366,7 @@
         main.appendChild(art);
       }
 
-      // Pages table
-      if (htmlPages.length === 0) {
+      if (data.stats.pages === 0) {
         const p = document.createElement("p");
         p.className = "placeholder";
         p.textContent = "No saved pages in this scan.";
@@ -362,60 +374,111 @@
         return;
       }
 
-      const table = document.createElement("table");
-      table.className = "pages";
-      table.innerHTML = `<tr><th>Preview</th><th>Page</th><th>Links</th></tr>`;
+      // Page filter
+      const filter = document.createElement("input");
+      filter.type = "search";
+      filter.id = "pageFilter";
+      filter.placeholder = `Filter ${data.stats.pages} pages…`;
+      filter.oninput = () => renderTreePanel(filter.value.trim().toLowerCase());
+      main.appendChild(filter);
 
-      for (const file of htmlPages) {
-        const fileUrl = `/output/${file}`;
-        const webpFile = file.replace(/\.html?$/i, ".webp");
-        const hasShot = webps.has(webpFile);
+      const treeHost = document.createElement("div");
+      treeHost.id = "treeHost";
+      main.appendChild(treeHost);
 
-        // Page path relative to the scan's domain folder, for display.
-        const displayPath = "/" + file.split("/").slice(3).join("/");
-
-        const row = document.createElement("tr");
-
-        const tdPreview = document.createElement("td");
-        if (hasShot) {
-          const img = document.createElement("img");
-          img.className = "thumb";
-          img.loading = "lazy";
-          img.src = `/output/${webpFile}`;
-          img.alt = `Screenshot of ${displayPath}`;
-          img.onclick = () => showLightbox(`/output/${webpFile}`);
-          tdPreview.appendChild(img);
-        } else {
-          tdPreview.innerHTML = `<span class="muted">—</span>`;
-        }
-
-        const tdName = document.createElement("td");
-        tdName.textContent = displayPath;
-
-        const tdLinks = document.createElement("td");
-        const aHtml = document.createElement("a");
-        aHtml.href = fileUrl;
-        aHtml.target = "_blank";
-        aHtml.textContent = "HTML";
-        tdLinks.appendChild(aHtml);
-        if (hasShot) {
-          tdLinks.append(" · ");
-          const aShot = document.createElement("a");
-          aShot.href = `/output/${webpFile}`;
-          aShot.target = "_blank";
-          aShot.textContent = "Screenshot";
-          tdLinks.appendChild(aShot);
-        }
-
-        row.append(tdPreview, tdName, tdLinks);
-        table.appendChild(row);
-      }
-      main.appendChild(table);
+      renderTreePanel("");
     }
 
-    function showLightbox(src) {
-      document.getElementById("lightboxImg").src = src;
-      document.getElementById("lightbox").style.display = "flex";
+    function pageLink(node) {
+      const div = document.createElement("div");
+      div.className = "page-row";
+      const a = document.createElement("a");
+      a.href = `/page.html?scan=${encodeURIComponent(activeScan)}&path=${encodeURIComponent(node.path)}`;
+      const icon = document.createElement("span");
+      icon.className = "page-icon";
+      icon.textContent = "📄";
+      a.append(icon, document.createTextNode(node.name));
+      a.title = node.path;
+      div.appendChild(a);
+      return div;
+    }
+
+    /**
+     * Renders one directory as a <details> element. Children are only
+     * built into the DOM on first expand, so a 3000-page site renders
+     * instantly as collapsed folders with counts.
+     */
+    function dirNode(node, openDepth) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.append(document.createTextNode("📁 " + node.name));
+      const count = document.createElement("span");
+      count.className = "count";
+      count.textContent = node.pages;
+      summary.appendChild(count);
+      details.appendChild(summary);
+
+      let built = false;
+      const build = () => {
+        if (built) return;
+        built = true;
+        for (const child of node.children) {
+          details.appendChild(child.type === "page" ? pageLink(child) : dirNode(child, 0));
+        }
+      };
+      details.addEventListener("toggle", () => { if (details.open) build(); });
+
+      if (openDepth > 0) {
+        details.open = true;
+        build();
+        // Auto-descend single-directory chains (e.g. the domain folder).
+        const onlyDirs = node.children.filter(c => c.type === "dir");
+        if (onlyDirs.length === 1 && node.children.length === 1) {
+          details.querySelector("details")?.setAttribute("open", "");
+        }
+      }
+      return details;
+    }
+
+    function renderTreePanel(query) {
+      const host = document.getElementById("treeHost");
+      host.innerHTML = "";
+
+      const container = document.createElement("div");
+      container.className = "tree";
+
+      if (query.length >= 2) {
+        // Flat search across every page in the scan.
+        const matches = [];
+        (function walk(node) {
+          for (const child of node.children ?? []) {
+            if (child.type === "page") {
+              if (child.path.toLowerCase().includes(query)) matches.push(child);
+            } else {
+              walk(child);
+            }
+          }
+        })(currentTree);
+
+        const info = document.createElement("p");
+        info.className = "result-count";
+        info.textContent = matches.length === 0
+          ? "No pages match."
+          : `${matches.length} matching page${matches.length === 1 ? "" : "s"}${matches.length > 300 ? " (showing first 300)" : ""}`;
+        host.appendChild(info);
+
+        for (const m of matches.slice(0, 300)) {
+          const row = pageLink(m);
+          row.firstChild.lastChild.textContent = m.path; // show full path in results
+          container.appendChild(row);
+        }
+      } else {
+        for (const child of currentTree.children) {
+          container.appendChild(child.type === "page" ? pageLink(child) : dirNode(child, 1));
+        }
+      }
+
+      host.appendChild(container);
     }
 
     loadScans();
