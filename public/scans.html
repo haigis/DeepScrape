@@ -76,7 +76,8 @@
   <p id="error" style="color: red; text-align: center;"></p>
 
   <script>
-    const API_URL = "http://192.168.1.31:5700";
+    // Same-origin: the API serves this page, so relative URLs always work.
+    const API_URL = "";
 
     async function fetchScans() {
       try {
@@ -104,9 +105,14 @@
       }
     }
 
+    // Scan identifiers are "<hostname>/<date>".
     function extractHostname(scan) {
+      return scan.split("/")[0] || "Unknown Hostname";
+    }
+
+    function extractDate(scan) {
       const parts = scan.split("/");
-      return parts.length > 1 ? parts[1] : "Unknown Hostname";
+      return parts.length > 1 ? parts[1] : "Unknown Date";
     }
 
     async function buildScansList() {
@@ -132,7 +138,7 @@
         const scanDetailsDiv = document.createElement("div");
         scanDetailsDiv.className = "scan-details";
 
-        const scanDate = scan.split("/")[0];
+        const scanDate = extractDate(scan);
         const hostname = extractHostname(scan);
 
         const scanTitle = document.createElement("h2");
@@ -172,7 +178,7 @@
             row.innerHTML = `
               <td>${pageName}</td>
               <td><a href="${fileUrl}" target="_blank">Visit Page</a></td>
-              <td><a href="${fileUrl.replace('.html', '.webp')}" target="_blank">View Screenshot</a></td>
+              <td><a href="${fileUrl.replace(/\.html$/, '.webp')}" target="_blank">View Screenshot</a></td>
             `;
             table.appendChild(row);
           }

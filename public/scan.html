@@ -120,13 +120,13 @@
         <option value="scrape">Single URL</option>
         <option value="sitemap">Sitemap Scrape</option>
         <option value="spider">Spider Crawl</option>
-        <option value="file">Batch File</option>
+        <option value="batch">Batch (URL list)</option>
       </select>
     </div>
 
     <div class="form-group">
-      <label for="inputUrl">URL / Sitemap / File Path:</label>
-      <input type="text" id="inputUrl" placeholder="Enter URL, Sitemap URL, or File Path">
+      <label for="inputUrl">URL / Sitemap / URL list:</label>
+      <input type="text" id="inputUrl" placeholder="Enter URL, Sitemap URL, or comma-separated URL list">
     </div>
 
     <div class="form-group">
@@ -164,7 +164,8 @@
   </div>
 
   <script>
-    const API_URL = "http://192.168.1.31:5700";
+    // Same-origin: the API serves this page, so relative URLs always work.
+    const API_URL = "";
 
     function updateForm() {
       document.getElementById("spiderField").style.display = 
@@ -187,7 +188,7 @@
       }
 
       let endpoint = "";
-      let requestBody = { rateLimit, excludeUrls };
+      let requestBody = { rateLimit, ignoreUrls: excludeUrls };
 
       // ✅ **Only include these properties if they are true**
       if (document.getElementById("screenshotToggle").checked) {
@@ -211,9 +212,9 @@
           requestBody.url = inputUrl;
           requestBody.maxDepth = maxDepth;
           break;
-        case "file":
-          endpoint = "/scrape/file";
-          requestBody.filePath = inputUrl;
+        case "batch":
+          endpoint = "/scrape/batch";
+          requestBody.urls = inputUrl.split(",").map(u => u.trim()).filter(Boolean);
           break;
       }
 
