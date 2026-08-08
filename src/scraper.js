@@ -44,7 +44,8 @@ export function buildPagePath(url) {
     let pathName = parsedUrl.pathname.replace(/\/$/, '');
     if (pathName === '' || pathName === '/') {
         pathName = 'index.html';
-    } else {
+    } else if (!/\.html?$/i.test(pathName)) {
+        // Don't double-append: /a.html previously saved as a.html.html
         pathName += '.html';
     }
     return path.join(parsedUrl.hostname, pathName);
@@ -160,7 +161,7 @@ export async function scrapePage(browser, url, outDir, options = {}) {
             await waitMs(2000);
             await page.evaluate(() => window.scrollTo(0, 0));
             await waitMs(1000);
-            const screenshotFile = savePath.replace(/\.html$/, '.webp');
+            const screenshotFile = savePath.replace(/\.html?$/i, '.webp');
             await captureWebpScreenshot(page, screenshotFile);
         }
 

@@ -20,20 +20,20 @@ export function ensureDir(baseDir, relativePath) {
 }
 
 /**
- * Generates an output directory structure using UK date format.
+ * Generates an output directory structure using ISO date format
+ * (YYYY-MM-DD), so lexicographic sorting equals chronological sorting.
  * Example:
  * output/
  * ├── www.example.com/
- * │   ├── 15-03-2025/
+ * │   ├── 2026-08-08/
  *
  * @param {string} baseUrl - The website URL.
  * @returns {string} The generated directory path.
  */
 export function generateOutputDir(baseUrl) {
     try {
-        const now = new Date();
         const domain = new URL(baseUrl).hostname;
-        const datePart = now.toLocaleDateString('en-GB').replace(/\//g, '-'); // 15-03-2025
+        const datePart = new Date().toISOString().slice(0, 10); // 2026-08-08
         return path.join('output', domain, datePart);
     } catch (error) {
         console.error("❌ Error in generateOutputDir():", error);
