@@ -161,6 +161,8 @@
     </div>
 
     <button onclick="sendRequest()">Run Scrape</button>
+
+    <div id="jobStatus" style="margin-top: 15px; text-align: left; font-family: monospace; font-size: 14px; white-space: pre-wrap;"></div>
   </div>
 
   <script>
@@ -218,18 +220,52 @@
           break;
       }
 
+      const statusEl = document.getElementById("jobStatus");
+
       try {
         console.log("Sending request with payload:", requestBody);
 
-        await fetch(API_URL + endpoint, {
+        const response = await fetch(API_URL + endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
         });
+        const data = await response.json();
 
-        alert("Scraping started successfully!"); 
+        if (!response.ok) {
+          statusEl.textContent = "❌ " + (data.error || response.statusText);
+          return;
+        }
+
+        statusEl.textContent = `⏳ Job ${data.jobId} queued…`;
+        pollJob(data.statusUrl, statusEl);
       } catch (error) {
-        alert("❌ Error: " + error.message);
+        statusEl.textContent = "❌ Error: " + error.message;
+      }
+    }
+
+    async function pollJob(statusUrl, statusEl) {
+      try {
+        const response = await fetch(API_URL + statusUrl);
+        const job = await response.json();
+
+        if (job.status === "completed") {
+          statusEl.textContent = `✅ Job completed\n${JSON.stringify(job.result, null, 2)}`;
+          return;
+        }
+        if (job.status === "failed") {
+          statusEl.textContent = `❌ Job failed: ${job.error}`;
+          return;
+        }
+
+        const p = job.progress;
+        statusEl.textContent = p
+          ? `⏳ ${job.status} — ${p.done}/${p.total}${p.currentUrl ? "\n" + p.currentUrl : ""}`
+          : `⏳ ${job.status}…`;
+
+        setTimeout(() => pollJob(statusUrl, statusEl), 1500);
+      } catch (error) {
+        statusEl.textContent = "❌ Polling error: " + error.message;
       }
     }
   </script>

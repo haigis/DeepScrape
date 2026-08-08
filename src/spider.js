@@ -1,7 +1,6 @@
-import puppeteer from 'puppeteer';
 import fs from 'fs/promises';
 import path from 'path';
-import { scrapePage, resolveOptions } from './scraper.js';
+import { scrapePage, resolveOptions, getBrowser } from './scraper.js';
 import { generateOutputDir } from './fileHandler.js';
 import { waitMs } from './utils.js';
 
@@ -45,6 +44,7 @@ const normalizeUrl = (url) => {
 export async function spiderCrawl(startUrls, options = {}) {
     const opts = resolveOptions(options);
     const { rateLimit, maxDepth } = opts;
+    const { onProgress } = options;
 
     if (!startUrls || startUrls.length === 0) {
         console.error('❌ Error: spiderCrawl received an empty startUrls array.');
@@ -80,55 +80,52 @@ export async function spiderCrawl(startUrls, options = {}) {
     /** Map of URL -> Set of pages that link to it. */
     const incomingLinks = new Map();
 
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await getBrowser();
 
-    try {
-        while (queue.length) {
-            const { url, depth } = queue.shift();
-            if (visited.has(url) || isImageUrl(url)) continue;
+    while (queue.length) {
+        const { url, depth } = queue.shift();
+        if (visited.has(url) || isImageUrl(url)) continue;
 
-            visited.add(url);
-            console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
+        visited.add(url);
+        console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
+        onProgress?.({ done: visited.size, total: visited.size + queue.length, currentUrl: url });
 
-            const result = await scrapePage(browser, url, outDir, opts);
+        const result = await scrapePage(browser, url, outDir, opts);
 
-            if (!result.ok) {
-                // Navigation error or HTTP >= 400 — record and move on.
-                // Non-HTML content types are skipped but not "broken".
-                if (!result.error?.startsWith('non-HTML')) {
-                    console.error(`❌ Broken link: ${url} (${result.error})`);
-                    brokenLinks.add(url);
-                }
-                continue;
+        if (!result.ok) {
+            // Navigation error or HTTP >= 400 — record and move on.
+            // Non-HTML content types are skipped but not "broken".
+            if (!result.error?.startsWith('non-HTML')) {
+                console.error(`❌ Broken link: ${url} (${result.error})`);
+                brokenLinks.add(url);
             }
-
-            for (const rawLink of result.links) {
-                let link;
-                try {
-                    link = normalizeUrl(rawLink);
-                } catch {
-                    continue; // Ignore invalid URLs
-                }
-                if (link === url) continue;
-
-                linksList.add(link);
-
-                // Record who links to this URL (real incoming-links map).
-                if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
-                incomingLinks.get(link).add(url);
-
-                if (isImageUrl(link) || queued.has(link)) continue;
-
-                if (new URL(link).hostname === domain && depth < maxDepth) {
-                    queued.add(link);
-                    queue.push({ url: link, depth: depth + 1 });
-                }
-            }
-
-            if (rateLimit > 0) await waitMs(rateLimit);
+            continue;
         }
-    } finally {
-        await browser.close();
+
+        for (const rawLink of result.links) {
+            let link;
+            try {
+                link = normalizeUrl(rawLink);
+            } catch {
+                continue; // Ignore invalid URLs
+            }
+            if (link === url) continue;
+
+            linksList.add(link);
+
+            // Record who links to this URL (real incoming-links map).
+            if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
+            incomingLinks.get(link).add(url);
+
+            if (isImageUrl(link) || queued.has(link)) continue;
+
+            if (new URL(link).hostname === domain && depth < maxDepth) {
+                queued.add(link);
+                queue.push({ url: link, depth: depth + 1 });
+            }
+        }
+
+        if (rateLimit > 0) await waitMs(rateLimit);
     }
 
     console.log(`✅ Spider crawl completed. Visited ${visited.size} pages, ${brokenLinks.size} broken.`);

@@ -34,6 +34,34 @@ export function resolveOptions(options = {}) {
     return { ...defaultOptions, ...options };
 }
 
+// --- Shared browser -------------------------------------------------------
+// One Puppeteer instance reused across scrape runs/jobs. The job queue
+// closes it when the queue drains; the CLI closes it before exit.
+
+let sharedBrowser = null;
+
+/**
+ * Returns the shared Puppeteer browser, launching it if needed.
+ * @returns {Promise<object>}
+ */
+export async function getBrowser() {
+    if (!sharedBrowser || !sharedBrowser.connected) {
+        sharedBrowser = await puppeteer.launch({ headless: true });
+    }
+    return sharedBrowser;
+}
+
+/**
+ * Closes the shared browser if it is open.
+ */
+export async function closeBrowser() {
+    if (sharedBrowser) {
+        const b = sharedBrowser;
+        sharedBrowser = null;
+        await b.close().catch(() => {});
+    }
+}
+
 /**
  * Builds a file path that preserves the website structure.
  * @param {string} url - The page URL.
@@ -226,24 +254,29 @@ export async function processFile(filePath, ignoreUrls = []) {
  */
 export async function processUrls(urls, options = {}) {
     const opts = resolveOptions(options);
+    const { onProgress } = options;
     console.log(`🚀 Processing ${urls.length} URLs...`);
     console.log(`🖼 Screenshot: ${opts.screenshot ? 'Enabled' : 'Disabled'}`);
     console.log(`📥 Download Images: ${opts.downloadImages ? 'Enabled' : 'Disabled'}`);
 
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await getBrowser();
+    let processed = 0;
+    let failed = 0;
 
-    try {
-        for (const url of urls) {
-            try {
-                const outDir = generateOutputDir(url);
-                await scrapePage(browser, url, outDir, opts);
-            } catch (err) {
-                console.error(`❌ Error scraping ${url}: ${err.message}`);
-            }
-            if (opts.rateLimit > 0) await waitMs(opts.rateLimit);
+    for (const url of urls) {
+        onProgress?.({ done: processed + failed, total: urls.length, currentUrl: url });
+        try {
+            const outDir = generateOutputDir(url);
+            const result = await scrapePage(browser, url, outDir, opts);
+            result.ok ? processed++ : failed++;
+        } catch (err) {
+            failed++;
+            console.error(`❌ Error scraping ${url}: ${err.message}`);
         }
-    } finally {
-        await browser.close();
+        if (opts.rateLimit > 0) await waitMs(opts.rateLimit);
     }
-    console.log('✅ All URLs processed.');
+
+    onProgress?.({ done: urls.length, total: urls.length, currentUrl: null });
+    console.log(`✅ All URLs processed (${processed} ok, ${failed} failed).`);
+    return { processed, failed, total: urls.length };
 }

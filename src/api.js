@@ -6,6 +6,7 @@ import { processUrls } from './scraper.js';
 import { fetchSitemapUrls } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
+import { createJob, getJob, listJobs } from './jobs.js';
 
 const app = express();
 
@@ -82,30 +83,21 @@ app.get('/scans', (req, res) => {
  * POST /scrape
  * Scrapes a single URL.
  */
-app.post('/scrape', async (req, res) => {
+app.post('/scrape', (req, res) => {
   const { url, rateLimit = 1000, screenshot, downloadImages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
-  try {
-    const outDir = generateOutputDir(url);
-    if (!outDir) throw new Error('❌ Could not determine a valid output directory.');
+  const outDir = generateOutputDir(url);
+  const options = {
+    rateLimit,
+    screenshot: parseBoolean(screenshot),
+    downloadImages: parseBoolean(downloadImages),
+  };
 
-    const options = {
-      rateLimit,
-      screenshot: parseBoolean(screenshot),
-      downloadImages: parseBoolean(downloadImages),
-    };
+  const job = createJob('scrape', { url, ...options }, onProgress =>
+    processUrls([url], { ...options, onProgress }));
 
-    console.log(`📂 Using output directory: ${outDir}`);
-    console.log(`📡 Scraping: ${url}`);
-
-    await processUrls([url], options);
-
-    res.json({ success: true, outputDir: outDir });
-  } catch (error) {
-    console.error(`❌ Error in /scrape:`, error);
-    res.status(500).json({ error: error.message || 'Unknown server error' });
-  }
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, outputDir: outDir });
 });
 
 /**
@@ -113,13 +105,18 @@ app.post('/scrape', async (req, res) => {
  * Scrapes URLs from a sitemap.xml (sitemap indexes and .gz supported).
  * Accepts ignoreUrls (or excludeUrls) as substring patterns to skip.
  */
-app.post('/scrape/sitemap', async (req, res) => {
+app.post('/scrape/sitemap', (req, res) => {
   const { sitemapUrl, rateLimit = 1000, screenshot, downloadImages } = req.body;
   const ignoreUrls = req.body.ignoreUrls ?? req.body.excludeUrls ?? [];
   if (!sitemapUrl) return res.status(400).json({ error: 'Sitemap URL is required' });
 
-  try {
-    console.log(`📡 Fetching sitemap: ${sitemapUrl}`);
+  const options = {
+    rateLimit,
+    screenshot: parseBoolean(screenshot),
+    downloadImages: parseBoolean(downloadImages),
+  };
+
+  const job = createJob('sitemap', { sitemapUrl, ignoreUrls, ...options }, async onProgress => {
     let urls = await fetchSitemapUrls(sitemapUrl);
 
     if (ignoreUrls.length > 0) {
@@ -127,49 +124,34 @@ app.post('/scrape/sitemap', async (req, res) => {
       console.log(`🚫 Ignored ${ignoreUrls.length} URL patterns`);
     }
 
-    if (urls.length === 0) return res.status(400).json({ error: 'No valid URLs found in sitemap.' });
+    if (urls.length === 0) throw new Error('No valid URLs found in sitemap.');
 
-    console.log(`🚀 Processing ${urls.length} URLs...`);
-    const outDir = generateOutputDir(urls[0]);
+    const summary = await processUrls(urls, { ...options, onProgress });
+    return { ...summary, outputDir: generateOutputDir(urls[0]) };
+  });
 
-    await processUrls(urls, {
-      rateLimit,
-      screenshot: parseBoolean(screenshot),
-      downloadImages: parseBoolean(downloadImages),
-    });
-
-    res.json({ success: true, processedUrls: urls.length, ignoredUrls: ignoreUrls.length, outputDir: outDir });
-  } catch (error) {
-    console.error(`❌ Error in /scrape/sitemap:`, error);
-    res.status(500).json({ error: error.message || 'Unknown server error' });
-  }
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
 
 /**
  * POST /scrape/spider
  * Performs a spider crawl.
  */
-app.post('/scrape/spider', async (req, res) => {
+app.post('/scrape/spider', (req, res) => {
   const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
-  try {
-    console.log(`🕷️ Starting spider crawl on: ${url}`);
-    const outDir = generateOutputDir(url);
-    if (!outDir) throw new Error('❌ Could not determine a valid output directory.');
+  const options = {
+    rateLimit,
+    maxDepth,
+    screenshot: parseBoolean(screenshot),
+    downloadImages: parseBoolean(downloadImages),
+  };
 
-    await spiderCrawl([url], {
-      rateLimit,
-      maxDepth,
-      screenshot: parseBoolean(screenshot),
-      downloadImages: parseBoolean(downloadImages),
-    });
+  const job = createJob('spider', { url, ...options }, onProgress =>
+    spiderCrawl([url], { ...options, onProgress }));
 
-    res.json({ success: true, outputDir: outDir });
-  } catch (error) {
-    console.error(`❌ Error in /scrape/spider:`, error);
-    res.status(500).json({ error: error.message || 'Unknown server error' });
-  }
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
 
 /**
@@ -186,28 +168,41 @@ app.post('/scrape/batch', async (req, res) => {
     return res.status(400).json({ error: 'urls must be a non-empty array' });
   }
 
-  try {
-    const cleaned = urls
-      .map(u => String(u).trim())
-      .filter(u => /^https?:\/\//i.test(u))
-      .filter(u => !ignoreUrls.some(ignore => u.includes(ignore)));
+  const cleaned = urls
+    .map(u => String(u).trim())
+    .filter(u => /^https?:\/\//i.test(u))
+    .filter(u => !ignoreUrls.some(ignore => u.includes(ignore)));
 
-    if (cleaned.length === 0) return res.status(400).json({ error: 'No valid http(s) URLs in list.' });
+  if (cleaned.length === 0) return res.status(400).json({ error: 'No valid http(s) URLs in list.' });
 
-    console.log(`🚀 Processing ${cleaned.length} URLs from batch...`);
-    const outDir = generateOutputDir(cleaned[0]);
+  const options = {
+    rateLimit,
+    screenshot: parseBoolean(screenshot),
+    downloadImages: parseBoolean(downloadImages),
+  };
 
-    await processUrls(cleaned, {
-      rateLimit,
-      screenshot: parseBoolean(screenshot),
-      downloadImages: parseBoolean(downloadImages),
-    });
+  const job = createJob('batch', { urls: cleaned, ...options }, onProgress =>
+    processUrls(cleaned, { ...options, onProgress }));
 
-    res.json({ success: true, processedUrls: cleaned.length, outputDir: outDir });
-  } catch (error) {
-    console.error(`❌ Error in /scrape/batch:`, error);
-    res.status(500).json({ error: error.message || 'Unknown server error' });
-  }
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, queuedUrls: cleaned.length });
+});
+
+/**
+ * GET /jobs
+ * Lists recent jobs, newest first.
+ */
+app.get('/jobs', (req, res) => {
+  res.json({ jobs: listJobs() });
+});
+
+/**
+ * GET /jobs/:id
+ * Returns status/progress/result for one job.
+ */
+app.get('/jobs/:id', (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
 });
 
 /**

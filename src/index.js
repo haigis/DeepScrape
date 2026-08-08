@@ -1,4 +1,4 @@
-import { processUrls, processFile, resolveOptions } from './scraper.js';
+import { processUrls, processFile, resolveOptions, closeBrowser } from './scraper.js';
 import { spiderCrawl } from './spider.js';
 import { fetchSitemapUrls } from './sitemap.js';
 
@@ -91,7 +91,9 @@ Options:
     }
 }
 
-main().catch(err => {
-    console.error('❌ Fatal error:', err);
-    process.exit(1);
-});
+main()
+    .catch(err => {
+        console.error('❌ Fatal error:', err);
+        process.exitCode = 1;
+    })
+    .finally(() => closeBrowser());
