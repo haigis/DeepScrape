@@ -15,33 +15,78 @@ const MAX_LINKS_ANALYZED = 500;
 const MAX_INCOMING_ANALYZED = 100;
 
 /**
- * Extracts anchors from saved HTML: href, visible text and rel.
- * Saved pages have absolute hrefs (fixRelativePaths runs at scrape time).
- * @param {string} html
- * @returns {{href: string, text: string, rel: string}[]}
+ * Classifies an href by scheme so non-navigational links are reported
+ * rather than silently dropped.
+ * @param {string} href
+ * @returns {'page'|'mailto'|'tel'|'script'|'fragment'|'other'}
  */
-export function extractAnchors(html) {
-    const anchors = [];
-    for (const match of html.matchAll(/<a\s([^>]*?)>([\s\S]*?)<\/a>/gi)) {
-        const [, attrs, inner] = match;
+export function classifyHref(href) {
+    const value = href.trim();
+    if (/^https?:\/\//i.test(value)) return 'page';
+    if (/^mailto:/i.test(value)) return 'mailto';
+    if (/^tel:/i.test(value)) return 'tel';
+    if (/^javascript:/i.test(value)) return 'script';
+    if (value.startsWith('#')) return 'fragment';
+    return 'other';
+}
+
+/**
+ * Extracts links from saved HTML: `<a>` elements and `<area>` image-map
+ * links. Saved pages have absolute hrefs (fixRelativePaths runs at
+ * scrape time), but every scheme is classified so mailto/tel/javascript
+ * and in-page fragments can be counted instead of discarded.
+ *
+ * @param {string} html
+ * @param {{includeNonHttp?: boolean}} [opts]
+ * @returns {{href: string, text: string, rel: string, kind: string,
+ *            nofollow: boolean, ugc: boolean, sponsored: boolean,
+ *            tag: 'a'|'area'}[]}
+ */
+export function extractAnchors(html, { includeNonHttp = false } = {}) {
+    const links = [];
+
+    const push = (attrs, inner, tag) => {
         const href = attrs.match(/href\s*=\s*"([^"]*)"/i)?.[1]
             ?? attrs.match(/href\s*=\s*'([^']*)'/i)?.[1];
-        if (!href || !/^https?:\/\//i.test(href)) continue;
+        if (!href) return;
 
-        const text = inner
+        const kind = classifyHref(href);
+        if (kind !== 'page' && !includeNonHttp) return;
+
+        const rel = (attrs.match(/rel\s*=\s*"([^"]*)"/i)?.[1]
+            ?? attrs.match(/rel\s*=\s*'([^']*)'/i)?.[1]
+            ?? '').toLowerCase();
+        const relTokens = rel.split(/\s+/).filter(Boolean);
+
+        const text = (inner ?? '')
             .replace(/<[^>]*>/g, ' ')       // strip nested markup (spans, imgs…)
             .replace(/&nbsp;/gi, ' ')
             .replace(/\s+/g, ' ')
             .trim()
-            .slice(0, 120);
+            .slice(0, 120)
+            // `<area>` has no inner text — fall back to its alt attribute.
+            || (tag === 'area' ? (attrs.match(/alt\s*=\s*"([^"]*)"/i)?.[1] ?? '') : '');
 
-        anchors.push({
-            href,
+        links.push({
+            href: href.trim(),
             text,
-            rel: attrs.match(/rel\s*=\s*"([^"]*)"/i)?.[1]?.toLowerCase() ?? '',
+            rel,
+            kind,
+            tag,
+            nofollow: relTokens.includes('nofollow'),
+            ugc: relTokens.includes('ugc'),
+            sponsored: relTokens.includes('sponsored'),
         });
+    };
+
+    for (const match of html.matchAll(/<a\s([^>]*?)>([\s\S]*?)<\/a>/gi)) {
+        push(match[1], match[2], 'a');
     }
-    return anchors;
+    for (const match of html.matchAll(/<area\s([^>]*?)\/?>/gi)) {
+        push(match[1], '', 'area');
+    }
+
+    return links;
 }
 
 /**
@@ -59,6 +104,124 @@ export function urlToScanPath(url) {
 }
 
 const stripTrailingSlash = (url) => url.replace(/\/+$/, '');
+
+/** Safety caps for the whole-scan inbound index. */
+const MAX_INDEXED_PAGES = 5000;
+
+/** scanPath -> { token, index } — rebuilt when files change. */
+const inboundCache = new Map();
+
+/**
+ * Lists every saved page in a scan with its mtime (cheap: readdir+stat).
+ * @param {string} scanPath
+ * @returns {Promise<{rel: string, mtimeMs: number}[]>}
+ */
+async function listPageFiles(scanPath) {
+    const files = [];
+
+    async function walk(dir, rel) {
+        let entries;
+        try {
+            entries = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+
+        const pages = entries.filter(e => !e.isDirectory() && /\.html?$/i.test(e.name));
+        const stats = await Promise.all(pages.map(e =>
+            fs.stat(path.join(dir, e.name)).catch(() => null)));
+        pages.forEach((entry, i) => {
+            if (stats[i]) {
+                files.push({
+                    rel: rel ? `${rel}/${entry.name}` : entry.name,
+                    mtimeMs: stats[i].mtimeMs,
+                });
+            }
+        });
+
+        for (const entry of entries) {
+            if (!entry.isDirectory() || entry.name === 'images' || entry.name === 'assets') continue;
+            await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
+        }
+    }
+
+    await walk(scanPath, '');
+    return files;
+}
+
+/**
+ * Builds (and caches) the scan's inbound link index by reading the
+ * anchors of **every saved page** — not just the spider's
+ * incoming-links.json, which only covers what one crawl reached and is
+ * absent entirely from sitemap/batch scans (see issue #19).
+ *
+ * @param {string} scanPath
+ * @returns {Promise<{index: Map<string, object[]>, pagesIndexed: number, truncated: boolean}>}
+ *          index maps a page's scan-relative path to the pages linking to it.
+ */
+export async function getInboundIndex(scanPath) {
+    const files = await listPageFiles(scanPath);
+    const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}`;
+
+    const cached = inboundCache.get(scanPath);
+    if (cached && cached.token === token) return cached.value;
+
+    const considered = files.slice(0, MAX_INDEXED_PAGES);
+    const index = new Map();
+
+    // Read in batches so a large scan doesn't open thousands of handles.
+    const BATCH = 32;
+    for (let i = 0; i < considered.length; i += BATCH) {
+        const batch = considered.slice(i, i + BATCH);
+        const contents = await Promise.all(batch.map(f =>
+            fs.readFile(path.join(scanPath, f.rel), 'utf8').catch(() => null)));
+
+        batch.forEach((file, j) => {
+            const html = contents[j];
+            if (!html) return;
+
+            const sourceUrl = html.match(/^<!--\s*(https?:\/\/\S+)\s*-->/)?.[1] ?? null;
+
+            // Collapse repeats of the same target within one source page.
+            const perTarget = new Map();
+            for (const link of extractAnchors(html)) {
+                const targetRel = urlToScanPath(link.href.split('#')[0]);
+                if (!targetRel || targetRel === file.rel) continue;
+
+                const entry = perTarget.get(targetRel);
+                if (entry) {
+                    entry.occurrences++;
+                    if (!entry.anchorTexts.includes(link.text) && link.text && entry.anchorTexts.length < 5) {
+                        entry.anchorTexts.push(link.text);
+                    }
+                    entry.nofollow = entry.nofollow && link.nofollow;
+                } else {
+                    perTarget.set(targetRel, {
+                        path: file.rel,
+                        url: sourceUrl,
+                        anchorTexts: link.text ? [link.text] : [],
+                        occurrences: 1,
+                        nofollow: link.nofollow,
+                        scraped: true,
+                    });
+                }
+            }
+
+            for (const [targetRel, entry] of perTarget) {
+                if (!index.has(targetRel)) index.set(targetRel, []);
+                index.get(targetRel).push(entry);
+            }
+        });
+    }
+
+    const value = {
+        index,
+        pagesIndexed: considered.length,
+        truncated: files.length > MAX_INDEXED_PAGES,
+    };
+    inboundCache.set(scanPath, { token, value });
+    return value;
+}
 
 /** Collapses markup and whitespace inside an element's inner HTML. */
 const innerText = (html) => html
@@ -325,7 +488,7 @@ export async function getPageDetails(scanPath, scan, pagePath) {
     } catch { /* no crawl artifacts */ }
 
     const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url);
-    const incomingDetailed = await analyzeIncoming(scanPath, scan, url);
+    const incomingDetailed = await analyzeIncoming(scanPath, scan, pagePath, url);
 
     let meta = null;
     try {
@@ -353,15 +516,18 @@ export async function getPageDetails(scanPath, scan, pagePath) {
             internal: links.internal,
             external: links.external,
             externalHosts: links.externalHosts,
+            other: links.other,
             counts: {
                 incoming: incomingDetailed.length,
                 internal: links.internal.length,
                 external: links.external.length,
                 externalHosts: links.externalHosts.length,
+                other: links.other.length,
                 brokenOut: links.internal.filter(l => l.broken).length,
                 notScraped: links.internal.filter(l => !l.scraped && !l.broken).length,
                 nofollow: [...links.internal, ...links.external].filter(l => l.nofollow).length,
                 truncated: links.truncated,
+                indexTruncated: !!incomingDetailed.truncatedIndex,
             },
         },
     };
@@ -375,15 +541,25 @@ export async function getPageDetails(scanPath, scan, pagePath) {
 async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl) {
     let anchors;
     try {
-        anchors = extractAnchors(await fs.readFile(absPage, 'utf8'));
+        anchors = extractAnchors(await fs.readFile(absPage, 'utf8'), { includeNonHttp: true });
     } catch {
-        return { internal: [], external: [], externalHosts: [], truncated: false };
+        return { internal: [], external: [], externalHosts: [], other: [], truncated: false };
     }
+
+    // Non-navigational links (mailto:, tel:, javascript:, #fragment) are
+    // counted separately rather than silently dropped.
+    const otherByHref = new Map();
+    for (const anchor of anchors.filter(a => a.kind !== 'page')) {
+        const existing = otherByHref.get(anchor.href);
+        if (existing) existing.occurrences++;
+        else otherByHref.set(anchor.href, { url: anchor.href, text: anchor.text, kind: anchor.kind, occurrences: 1 });
+    }
+    const other = [...otherByHref.values()];
 
     // Dedupe by URL, keeping the first non-empty anchor text and
     // counting how often the page links to the same target.
     const byUrl = new Map();
-    for (const anchor of anchors) {
+    for (const anchor of anchors.filter(a => a.kind === 'page')) {
         const clean = stripTrailingSlash(anchor.href.split('#')[0]);
         if (!clean || (selfUrl && clean === stripTrailingSlash(selfUrl))) continue;
         const existing = byUrl.get(clean);
@@ -394,7 +570,9 @@ async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, sel
             byUrl.set(clean, {
                 url: clean,
                 text: anchor.text,
-                nofollow: anchor.rel.includes('nofollow'),
+                nofollow: anchor.nofollow,
+                ugc: anchor.ugc,
+                sponsored: anchor.sponsored,
                 occurrences: 1,
             });
         }
@@ -442,58 +620,60 @@ async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, sel
     internal.sort((a, b) => Number(b.broken) - Number(a.broken) || a.url.localeCompare(b.url));
     external.sort((a, b) => a.host.localeCompare(b.host) || a.url.localeCompare(b.url));
 
-    return { internal, external, externalHosts, truncated };
+    return { internal, external, externalHosts, other, truncated };
 }
 
 /**
- * Resolves the pages that link to this one, recovering the anchor text
- * each source used and linking through to the source's own dashboard.
+ * Resolves the pages that link to this one.
+ *
+ * Sources come from the whole-scan inbound index (every saved page's
+ * anchors), unioned with the spider's incoming-links.json so pages the
+ * crawl saw but did not save are still reported.
  */
-async function analyzeIncoming(scanPath, scan, url) {
-    if (!url) return [];
+async function analyzeIncoming(scanPath, scan, pagePath, url) {
+    const { index, truncated } = await getInboundIndex(scanPath);
+    const byPath = new Map();
 
-    let sources = [];
-    try {
-        const map = JSON.parse(await fs.readFile(path.join(scanPath, 'incoming-links.json'), 'utf8'));
-        sources = map[url] ?? map[stripTrailingSlash(url)] ?? map[url + '/'] ?? [];
-    } catch {
-        return []; // not a spider scan
+    for (const entry of index.get(pagePath) ?? []) {
+        byPath.set(entry.path, {
+            ...entry,
+            pageUrl: `/page.html?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(entry.path)}`,
+        });
     }
 
-    const target = stripTrailingSlash(url);
-    const results = [];
-
-    for (const sourceUrl of sources.slice(0, MAX_INCOMING_ANALYZED)) {
-        const rel = urlToScanPath(sourceUrl);
-        const entry = {
-            url: sourceUrl,
-            path: rel,
-            anchorTexts: [],
-            occurrences: 0,
-            nofollow: false,
-            scraped: false,
-            pageUrl: null,
-        };
-
-        if (rel) {
-            const abs = path.join(scanPath, rel);
-            try {
-                const anchors = extractAnchors(await fs.readFile(abs, 'utf8'))
-                    .filter(a => stripTrailingSlash(a.href.split('#')[0]) === target);
-                entry.scraped = true;
-                entry.occurrences = anchors.length;
-                entry.nofollow = anchors.length > 0 && anchors.every(a => a.rel.includes('nofollow'));
-                entry.anchorTexts = [...new Set(anchors.map(a => a.text).filter(Boolean))].slice(0, 5);
-                entry.pageUrl = `/page.html?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(rel)}`;
-            } catch { /* source page not saved in this scan */ }
-        }
-
-        results.push(entry);
+    // Union with the crawl artifact: it may name sources that were never
+    // saved as pages (e.g. crawl stopped before reaching them).
+    if (url) {
+        try {
+            const map = JSON.parse(await fs.readFile(path.join(scanPath, 'incoming-links.json'), 'utf8'));
+            const sources = map[url] ?? map[stripTrailingSlash(url)] ?? map[url + '/'] ?? [];
+            for (const sourceUrl of sources) {
+                const rel = urlToScanPath(sourceUrl);
+                if (rel && byPath.has(rel)) continue; // already indexed, with richer data
+                const key = rel ?? sourceUrl;
+                if (byPath.has(key)) continue;
+                byPath.set(key, {
+                    path: rel,
+                    url: sourceUrl,
+                    anchorTexts: [],
+                    occurrences: 1,
+                    nofollow: false,
+                    scraped: false,
+                    pageUrl: null,
+                    fromCrawlOnly: true,
+                });
+            }
+        } catch { /* not a spider scan */ }
     }
 
-    // Sources that actually name the page (anchor text) first.
-    results.sort((a, b) => b.anchorTexts.length - a.anchorTexts.length || a.url.localeCompare(b.url));
-    return results;
+    const results = [...byPath.values()]
+        // Sources that actually name the page (anchor text) first.
+        .sort((a, b) => b.anchorTexts.length - a.anchorTexts.length
+            || b.occurrences - a.occurrences
+            || (a.path ?? a.url ?? '').localeCompare(b.path ?? b.url ?? ''));
+
+    results.truncatedIndex = truncated;
+    return results.slice(0, MAX_INCOMING_ANALYZED);
 }
 
 /**

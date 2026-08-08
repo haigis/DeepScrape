@@ -5,6 +5,7 @@ import os from 'node:os';
 import {
     buildScanTree, getPageDetails, getPageHistory, readPageUrl,
     extractAnchors, urlToScanPath, extractPageMeta, assessDiscoverability,
+    classifyHref, getInboundIndex,
 } from '../src/scanStore.js';
 
 let root;        // temp output/<domain>
@@ -97,12 +98,56 @@ describe('buildScanTree', () => {
 describe('extractAnchors', () => {
     it('captures href, visible text and rel, stripping nested markup', () => {
         const anchors = extractAnchors('<a href="https://x.example/a" rel="NOFOLLOW"><span>Hello</span> world</a>');
-        expect(anchors).toEqual([{ href: 'https://x.example/a', text: 'Hello world', rel: 'nofollow' }]);
+        expect(anchors).toHaveLength(1);
+        expect(anchors[0]).toMatchObject({
+            href: 'https://x.example/a', text: 'Hello world', rel: 'nofollow',
+            kind: 'page', tag: 'a', nofollow: true, ugc: false, sponsored: false,
+        });
     });
 
-    it('ignores non-http hrefs and anchors without href', () => {
-        const anchors = extractAnchors('<a href="mailto:a@b.c">mail</a><a>plain</a><a href="/rel">rel</a>');
+    it('recognises ugc and sponsored rel tokens', () => {
+        const [link] = extractAnchors('<a href="https://x.example/a" rel="ugc sponsored noopener">x</a>');
+        expect(link.ugc).toBe(true);
+        expect(link.sponsored).toBe(true);
+        expect(link.nofollow).toBe(false);
+    });
+
+    it('skips non-http hrefs by default and anchors without href', () => {
+        const anchors = extractAnchors('<a href="mailto:a@b.c">mail</a><a>plain</a><a href="#top">top</a>');
         expect(anchors).toEqual([]);
+    });
+
+    it('classifies non-http links when asked for them', () => {
+        const anchors = extractAnchors(
+            '<a href="mailto:a@b.c">Mail us</a><a href="tel:+441234">Call</a>'
+            + '<a href="javascript:void(0)">JS</a><a href="#top">Top</a>'
+            + '<a href="https://x.example/">Page</a>',
+            { includeNonHttp: true });
+        expect(anchors.map(a => a.kind)).toEqual(['mailto', 'tel', 'script', 'fragment', 'page']);
+    });
+
+    it('includes <area> image-map links, falling back to alt text', () => {
+        const anchors = extractAnchors('<area href="https://x.example/zone" alt="Zone one">');
+        expect(anchors).toHaveLength(1);
+        expect(anchors[0]).toMatchObject({ tag: 'area', text: 'Zone one', kind: 'page' });
+    });
+
+    it('reads single-quoted href and rel attributes', () => {
+        const [link] = extractAnchors("<a href='https://x.example/q' rel='nofollow'>q</a>");
+        expect(link.href).toBe('https://x.example/q');
+        expect(link.nofollow).toBe(true);
+    });
+});
+
+describe('classifyHref', () => {
+    it('classifies each scheme', () => {
+        expect(classifyHref('https://x.example')).toBe('page');
+        expect(classifyHref('HTTP://x.example')).toBe('page');
+        expect(classifyHref('mailto:a@b.c')).toBe('mailto');
+        expect(classifyHref('tel:+44')).toBe('tel');
+        expect(classifyHref('javascript:void(0)')).toBe('script');
+        expect(classifyHref('#section')).toBe('fragment');
+        expect(classifyHref('ftp://x.example')).toBe('other');
     });
 });
 
@@ -302,6 +347,91 @@ describe('getPageDetails metadata', () => {
         expect(d.discoverability.inboundFollowed).toBe(1);
         expect(d.discoverability.canonicalisedAway).toBe(false);
         expect(d.discoverability.headerRobotsChecked).toBe(false);
+    });
+});
+
+describe('getInboundIndex (issue #19)', () => {
+    let noCrawlScan;
+
+    beforeAll(async () => {
+        // A sitemap/batch-style scan: pages saved, NO incoming-links.json.
+        noCrawlScan = path.join(root, 'nocrawl');
+        const page = (url, body) => `<!-- ${url} -->\n<html><body>${body}</body></html>`;
+        await write(noCrawlScan, 'shop.example/index.html',
+            page('https://shop.example/', '<a href="https://shop.example/deals">Deals</a>'));
+        await write(noCrawlScan, 'shop.example/about.html',
+            page('https://shop.example/about', '<a href="https://shop.example/deals">Today’s deals</a>'));
+        await write(noCrawlScan, 'shop.example/help.html',
+            page('https://shop.example/help', '<a href="https://shop.example/deals">Deals</a><a href="https://shop.example/deals#top">Deals anchor</a>'));
+        await write(noCrawlScan, 'shop.example/deals.html',
+            page('https://shop.example/deals', '<a href="https://shop.example/">Home</a>'));
+        await write(noCrawlScan, 'shop.example/lonely.html',
+            page('https://shop.example/lonely', '<p>nothing links here</p>'));
+    });
+
+    it('finds every linking page without any crawl artifact', async () => {
+        const { index } = await getInboundIndex(noCrawlScan);
+        const sources = index.get('shop.example/deals.html');
+        expect(sources.map(s => s.path).sort())
+            .toEqual(['shop.example/about.html', 'shop.example/help.html', 'shop.example/index.html']);
+    });
+
+    it('keeps the anchor text each source used', async () => {
+        const { index } = await getInboundIndex(noCrawlScan);
+        const about = index.get('shop.example/deals.html')
+            .find(s => s.path === 'shop.example/about.html');
+        expect(about.anchorTexts).toEqual(['Today’s deals']);
+        expect(about.url).toBe('https://shop.example/about');
+        expect(about.scraped).toBe(true);
+    });
+
+    it('collapses repeat links from one source into an occurrence count', async () => {
+        const { index } = await getInboundIndex(noCrawlScan);
+        const help = index.get('shop.example/deals.html')
+            .find(s => s.path === 'shop.example/help.html');
+        expect(help.occurrences).toBe(2); // /deals and /deals#top
+    });
+
+    it('leaves genuinely unlinked pages out of the index', async () => {
+        const { index } = await getInboundIndex(noCrawlScan);
+        expect(index.has('shop.example/lonely.html')).toBe(false);
+    });
+
+    it('reports inbound links through getPageDetails with no crawl data', async () => {
+        const d = await getPageDetails(noCrawlScan, 'shop.example/2026-08-08', 'shop.example/deals.html');
+        expect(d.links.counts.incoming).toBe(3);
+        expect(d.links.incoming[0].pageUrl).toContain('page.html?scan=');
+    });
+
+    it('rebuilds the index when a page changes', async () => {
+        const before = (await getInboundIndex(noCrawlScan)).index.get('shop.example/deals.html').length;
+        await new Promise(r => setTimeout(r, 12)); // ensure a new mtime
+        await write(noCrawlScan, 'shop.example/extra.html',
+            '<!-- https://shop.example/extra -->\n<html><a href="https://shop.example/deals">More deals</a></html>');
+        const after = (await getInboundIndex(noCrawlScan)).index.get('shop.example/deals.html').length;
+        expect(after).toBe(before + 1);
+    });
+});
+
+describe('link type reporting', () => {
+    it('separates mailto/tel/javascript/fragment links from page links', async () => {
+        const mixedScan = path.join(root, 'mixed');
+        await write(mixedScan, 'x.example/index.html',
+            '<!-- https://x.example/ -->\n<html>'
+            + '<a href="mailto:hi@x.example">Email us</a>'
+            + '<a href="tel:+441234567">Call us</a>'
+            + '<a href="javascript:openChat()">Chat</a>'
+            + '<a href="#main">Skip to content</a>'
+            + '<a href="https://x.example/about">About</a>'
+            + '</html>');
+
+        const d = await getPageDetails(mixedScan, 'x.example/2026-08-08', 'x.example/index.html');
+        expect(d.links.counts.other).toBe(4);
+        expect(d.links.other.map(o => o.kind).sort())
+            .toEqual(['fragment', 'mailto', 'script', 'tel']);
+        expect(d.links.other.find(o => o.kind === 'mailto').text).toBe('Email us');
+        // The real page link is still classified as internal.
+        expect(d.links.counts.internal).toBe(1);
     });
 });
 

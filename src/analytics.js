@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { urlToScanPath } from './scanStore.js';
+import { urlToScanPath, getInboundIndex } from './scanStore.js';
 
 /**
  * Scan analytics: aggregate site metrics and per-page "attributes"
@@ -104,15 +104,24 @@ export async function buildDashboard(domainRoot, domain, date) {
         incomingMap = JSON.parse(await fs.readFile(path.join(scanPath, 'incoming-links.json'), 'utf8'));
     } catch { /* not a spider scan */ }
 
-    // Map inbound counts onto pages by converting each linked URL to the
-    // path it would occupy. Deriving paths from URLs is O(links); reading
-    // every page's saved URL would be O(pages) file opens (~2s at 3k pages).
+    // Inbound counts come from the whole-scan index (every saved page's
+    // anchors), unioned with the crawl artifact. Using incoming-links.json
+    // alone under-counts badly when the spider covered only part of the
+    // scan, or misses everything for sitemap/batch scans (issue #19).
+    const { index: inboundIndex } = await getInboundIndex(scanPath);
     const inboundByPath = new Map();
+    for (const [target, sources] of inboundIndex) {
+        inboundByPath.set(target, sources.length);
+    }
+
     const urlByPath = new Map();
     for (const [url, sources] of Object.entries(incomingMap)) {
         const rel = urlToScanPath(url);
         if (!rel) continue;
-        inboundByPath.set(rel, (inboundByPath.get(rel) ?? 0) + sources.length);
+        if (!inboundIndex.has(rel)) {
+            // Crawl saw links to this page from pages that were not saved.
+            inboundByPath.set(rel, (inboundByPath.get(rel) ?? 0) + sources.length);
+        }
         if (!urlByPath.has(rel)) urlByPath.set(rel, url);
     }
 
@@ -202,7 +211,7 @@ export async function buildDashboard(domainRoot, domain, date) {
             screenshotCoverage: pages.length
                 ? Math.round((pages.filter(p => p.screenshot).length / pages.length) * 100)
                 : 0,
-            hasCrawlData: Object.keys(incomingMap).length > 0,
+            hasCrawlData: inboundIndex.size > 0 || Object.keys(incomingMap).length > 0,
         },
         sections: sectionList,
         depths,

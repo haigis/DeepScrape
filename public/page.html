@@ -841,6 +841,7 @@
         ["incoming", "Incoming", c.incoming],
         ["internal", "Internal out", c.internal],
         ["external", "External out", c.external],
+        ["other", "Other", c.other ?? 0],
       ];
       for (const [key, label, count] of tabDefs) {
         const btn = el("button", "tab" + (activeTab === key ? " active" : ""), label);
@@ -866,7 +867,39 @@
 
       if (activeTab === "incoming") return renderIncoming(body);
       if (activeTab === "internal") return renderInternal(body);
+      if (activeTab === "other") return renderOther(body);
       return renderExternal(body);
+    }
+
+    const KIND_LABELS = {
+      mailto: "Email", tel: "Phone", script: "javascript:", fragment: "In-page anchor", other: "Other scheme",
+    };
+
+    function renderOther(body) {
+      const rows = linkData.other ?? [];
+      if (rows.length === 0) {
+        body.appendChild(el("p", "empty",
+          "No mailto:, tel:, javascript: or in-page anchor links on this page."));
+        return;
+      }
+      const table = el("table", "links");
+      const head = el("tr");
+      for (const h of ["Anchor text", "Target", "Type", ""]) head.appendChild(el("th", null, h));
+      table.appendChild(head);
+
+      for (const r of rows.slice(0, 300)) {
+        const tr = el("tr");
+        tr.appendChild(anchorCell(r.text ? [r.text] : []));
+        const td = el("td", "url");
+        td.appendChild(el("span", null, r.url));
+        tr.appendChild(td);
+        tr.appendChild(el("td", null, KIND_LABELS[r.kind] ?? r.kind));
+        const flags = el("td");
+        if (r.occurrences > 1) flags.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
+        tr.appendChild(flags);
+        table.appendChild(tr);
+      }
+      body.appendChild(table);
     }
 
     function filterBox(placeholder, onFilter) {
@@ -943,7 +976,10 @@
           tr.appendChild(cnt);
           const flags = el("td");
           if (r.nofollow) flags.appendChild(el("span", "badge b-nofollow", "nofollow"));
-          if (!r.scraped) flags.appendChild(el("span", "badge b-missing", "source not saved"));
+          if (!r.scraped) {
+            flags.appendChild(el("span", "badge b-missing",
+              r.fromCrawlOnly ? "seen by crawl only" : "source not saved"));
+          }
           tr.appendChild(flags);
           table.appendChild(tr);
         }
