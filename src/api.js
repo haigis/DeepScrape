@@ -47,6 +47,8 @@ const paramsToOptions = (params) => ({
   maxDepth: Number(params.maxDepth) || 2,
   // Optional folder scope, e.g. "/help" — only that subtree is crawled.
   pathPrefix: params.pathPrefix || null,
+  // Hard page ceiling, enforced by the crawler itself (plan limits).
+  maxPages: Number(params.maxPages) > 0 ? Number(params.maxPages) : null,
   screenshot: parseBoolean(params.screenshot),
   downloadImages: parseBoolean(params.downloadImages),
   // Offline copies are the default; pass offline:false to opt out.
@@ -152,12 +154,12 @@ app.post('/scrape/sitemap', (req, res) => {
  * Performs a spider crawl.
  */
 app.post('/scrape/spider', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, maxPages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const job = createJob(
     'spider',
-    { url, rateLimit, maxDepth, pathPrefix, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    { url, rateLimit, maxDepth, pathPrefix, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal, gate) =>
       spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal, gate }));
 

@@ -103,7 +103,20 @@ export async function spiderCrawl(startUrls, options = {}) {
 
     const browser = await getBrowser();
 
+    /**
+     * Hard ceiling on pages fetched. Callers billing by page size need a
+     * limit the crawler itself enforces — a plan cap that only lives in
+     * the calling app is not a cap at all.
+     */
+    const maxPages = Number(options.maxPages) > 0 ? Number(options.maxPages) : null;
+    let limitReached = false;
+
     while (queue.length) {
+        if (maxPages && visited.size >= maxPages) {
+            limitReached = true;
+            console.log(`🛑 Page limit reached (${maxPages}) — stopping crawl.`);
+            break;
+        }
         // Park here when a priority job needs the runner — the crawl
         // resumes from this exact point, losing no work.
         await gate?.wait();
@@ -166,5 +179,12 @@ export async function spiderCrawl(startUrls, options = {}) {
     await fs.writeFile(path.join(outDir, 'incoming-links.json'), JSON.stringify(incomingAsObject, null, 2), 'utf8');
 
     console.log(`📁 Saved crawl results to: ${outDir}`);
-    return { visited: visited.size, broken: brokenLinks.size, outDir, aborted: signal?.aborted ?? false };
+    return {
+        visited: visited.size,
+        broken: brokenLinks.size,
+        outDir,
+        aborted: signal?.aborted ?? false,
+        limitReached,
+        maxPages,
+    };
 }
