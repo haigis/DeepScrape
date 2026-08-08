@@ -10,6 +10,9 @@ import { buildPagePath } from './scraper.js';
 
 const ARTIFACT_NAMES = new Set(['all-links.txt', 'broken-links.txt', 'incoming-links.json']);
 
+/** Folders holding downloaded assets rather than saved pages. */
+const ASSET_FOLDERS = new Set(['images', '_assets']);
+
 /** Caps to keep a single page view cheap on very large pages. */
 const MAX_LINKS_ANALYZED = 500;
 const MAX_INCOMING_ANALYZED = 100;
@@ -140,7 +143,7 @@ async function listPageFiles(scanPath) {
         });
 
         for (const entry of entries) {
-            if (!entry.isDirectory() || entry.name === 'images' || entry.name === 'assets') continue;
+            if (!entry.isDirectory() || ASSET_FOLDERS.has(entry.name)) continue;
             await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
         }
     }
@@ -168,6 +171,8 @@ export async function getInboundIndex(scanPath) {
 
     const considered = files.slice(0, MAX_INDEXED_PAGES);
     const index = new Map();
+    /** path -> { h1, title } so link labels can name the page, not the anchor. */
+    const pageMeta = new Map();
 
     // Read in batches so a large scan doesn't open thousands of handles.
     const BATCH = 32;
@@ -181,6 +186,11 @@ export async function getInboundIndex(scanPath) {
             if (!html) return;
 
             const sourceUrl = html.match(/^<!--\s*(https?:\/\/\S+)\s*-->/)?.[1] ?? null;
+
+            // Cheap H1/title capture — we already have the file in memory.
+            const h1 = innerText(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? '') || null;
+            const title = innerText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '') || null;
+            pageMeta.set(file.rel, { h1, title, url: sourceUrl });
 
             // Collapse repeats of the same target within one source page.
             const perTarget = new Map();
@@ -214,8 +224,19 @@ export async function getInboundIndex(scanPath) {
         });
     }
 
+    // Attach each source's own H1/title so the UI can label a link by the
+    // page it comes from rather than by repeated nav anchor text.
+    for (const sources of index.values()) {
+        for (const source of sources) {
+            const meta = pageMeta.get(source.path);
+            source.h1 = meta?.h1 ?? null;
+            source.title = meta?.title ?? null;
+        }
+    }
+
     const value = {
         index,
+        pageMeta,
         pagesIndexed: considered.length,
         truncated: files.length > MAX_INDEXED_PAGES,
     };
@@ -420,6 +441,7 @@ export async function buildScanTree(scanPath) {
                     stats.images += imgs.length;
                     continue; // image assets are counted, not shown in the page tree
                 }
+                if (ASSET_FOLDERS.has(entry.name)) continue; // offline asset store
                 const child = await walk(path.join(dir, entry.name), rel);
                 if (child.pages > 0) {
                     node.children.push(child);
@@ -487,7 +509,8 @@ export async function getPageDetails(scanPath, scan, pagePath) {
         brokenSet = new Set(raw.split('\n').map(l => stripTrailingSlash(l.trim())).filter(Boolean));
     } catch { /* no crawl artifacts */ }
 
-    const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url);
+    const { pageMeta } = await getInboundIndex(scanPath);
+    const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url, pageMeta);
     const incomingDetailed = await analyzeIncoming(scanPath, scan, pagePath, url);
 
     let meta = null;
@@ -538,7 +561,7 @@ export async function getPageDetails(scanPath, scan, pagePath) {
  * internal targets to their place in the scan (scraped? broken?) and
  * grouping external links by host.
  */
-async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl) {
+async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl, pageMeta = new Map()) {
     let anchors;
     try {
         anchors = extractAnchors(await fs.readFile(absPage, 'utf8'), { includeNonHttp: true });
@@ -597,11 +620,14 @@ async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, sel
             const scraped = rel
                 ? await fs.access(path.join(scanPath, rel)).then(() => true, () => false)
                 : false;
+            const targetMeta = rel ? pageMeta.get(rel) : null;
             internal.push({
                 ...link,
                 host,
                 path: rel,
                 scraped,
+                h1: targetMeta?.h1 ?? null,
+                title: targetMeta?.title ?? null,
                 broken: brokenSet.has(link.url),
                 pageUrl: scraped && rel
                     ? `/page.html?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(rel)}`

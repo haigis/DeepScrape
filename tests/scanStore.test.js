@@ -360,7 +360,8 @@ describe('getInboundIndex (issue #19)', () => {
         await write(noCrawlScan, 'shop.example/index.html',
             page('https://shop.example/', '<a href="https://shop.example/deals">Deals</a>'));
         await write(noCrawlScan, 'shop.example/about.html',
-            page('https://shop.example/about', '<a href="https://shop.example/deals">Today’s deals</a>'));
+            page('https://shop.example/about',
+                '<h1>About the shop</h1><a href="https://shop.example/deals">Today’s deals</a>'));
         await write(noCrawlScan, 'shop.example/help.html',
             page('https://shop.example/help', '<a href="https://shop.example/deals">Deals</a><a href="https://shop.example/deals#top">Deals anchor</a>'));
         await write(noCrawlScan, 'shop.example/deals.html',
@@ -390,6 +391,14 @@ describe('getInboundIndex (issue #19)', () => {
         const help = index.get('shop.example/deals.html')
             .find(s => s.path === 'shop.example/help.html');
         expect(help.occurrences).toBe(2); // /deals and /deals#top
+    });
+
+    it('attaches each source page’s H1 so links can be labelled by page', async () => {
+        const { index, pageMeta } = await getInboundIndex(noCrawlScan);
+        expect(pageMeta.get('shop.example/about.html').h1).toBe('About the shop');
+        const about = index.get('shop.example/deals.html')
+            .find(s => s.path === 'shop.example/about.html');
+        expect(about.h1).toBe('About the shop');
     });
 
     it('leaves genuinely unlinked pages out of the index', async () => {

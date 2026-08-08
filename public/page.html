@@ -522,11 +522,12 @@
           const g = svgEl("g", { class: cls });
           g.appendChild(svgEl("rect", { x, y: y - boxH / 2, width: boxW, height: boxH }));
 
+          // Label a node by the page it *is* (its H1), not by the anchor
+          // text used to reach it — nav links repeat the same words on
+          // every page, which told you nothing about the source.
           const label = item.external
             ? item.host
-            : (side === "in"
-              ? (item.anchorTexts[0] || sitePathOf(item.path) || item.url)
-              : (item.text || sitePathOf(item.path) || item.url));
+            : (item.h1 || item.title || sitePathOf(item.path) || item.url);
           g.appendChild(Object.assign(
             svgEl("text", { x: x + 9, y: y + 4 }),
             { textContent: shortLabel(label) }));
@@ -535,18 +536,19 @@
             edge.classList.add("hot");
             const rows = side === "in"
               ? [
-                  item.url,
-                  item.anchorTexts.length ? `Anchor: “${item.anchorTexts.join('”, “')}”` : "(no anchor text)",
+                  sitePathOf(item.path) || item.url,
+                  item.anchorTexts.length ? `Linked as: “${item.anchorTexts.join('”, “')}”` : "(no anchor text)",
                   item.occurrences > 1 ? `Links here ${item.occurrences}×` : null,
                   item.nofollow ? "nofollow" : null,
                 ]
               : [
-                  item.url,
-                  item.text ? `Anchor: “${item.text}”` : "(no anchor text)",
+                  item.external ? item.url : (sitePathOf(item.path) || item.url),
+                  item.text ? `Linked as: “${item.text}”` : "(no anchor text)",
                   item.external ? `External host: ${item.host}` : (item.broken ? "Broken link" : (item.scraped ? "Target scraped" : "Target not scraped")),
                   item.nofollow ? "nofollow" : null,
                 ];
-            showTip(event, side === "in" ? "Links to this page" : "This page links to",
+            showTip(event,
+              item.h1 || item.title || (side === "in" ? "Links to this page" : "This page links to"),
               rows.filter(Boolean),
               item.pageUrl ? "Click to open that page’s dashboard" : "Click to open the live URL");
           });
@@ -583,7 +585,7 @@
       section.appendChild(panel);
 
       const hint = el("p", "graph-hint");
-      hint.textContent = "Hover a node to highlight its connection and see the anchor text; click to jump to that page’s dashboard. "
+      hint.textContent = "Nodes are labelled by each page’s H1. Hover to highlight the connection and see the anchor text used; click to jump to that page’s dashboard. "
         + `Showing up to 8 inbound, 8 internal outbound and 4 external hosts.`;
       section.appendChild(hint);
       return section;
@@ -964,11 +966,14 @@
 
         const table = el("table", "links");
         const head = el("tr");
-        for (const h of ["Anchor text", "Linking page", "Links", ""]) head.appendChild(el("th", null, h));
+        for (const h of ["Linking page", "Linked as", "URL", "Links", ""]) head.appendChild(el("th", null, h));
         table.appendChild(head);
 
         for (const r of shown.slice(0, 300)) {
           const tr = el("tr");
+          const nameTd = el("td");
+          nameTd.appendChild(el("span", "anchor-text", r.h1 || r.title || sitePathOf(r.path) || "—"));
+          tr.appendChild(nameTd);
           tr.appendChild(anchorCell(r.anchorTexts));
           tr.appendChild(urlCell(r));
           const cnt = el("td");
@@ -1008,11 +1013,15 @@
 
         const table = el("table", "links");
         const head = el("tr");
-        for (const h of ["Anchor text", "Target page", "Status", ""]) head.appendChild(el("th", null, h));
+        for (const h of ["Target page", "Linked as", "URL", "Status", ""]) head.appendChild(el("th", null, h));
         table.appendChild(head);
 
         for (const r of shown.slice(0, 300)) {
           const tr = el("tr");
+          const nameTd = el("td");
+          nameTd.appendChild(el("span", r.h1 || r.title ? "anchor-text" : "anchor-none",
+            r.h1 || r.title || (r.scraped ? sitePathOf(r.path) : "(not scraped)")));
+          tr.appendChild(nameTd);
           tr.appendChild(anchorCell(r.text ? [r.text] : []));
           tr.appendChild(urlCell(r));
 

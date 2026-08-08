@@ -46,6 +46,8 @@ const paramsToOptions = (params) => ({
   maxDepth: Number(params.maxDepth) || 2,
   screenshot: parseBoolean(params.screenshot),
   downloadImages: parseBoolean(params.downloadImages),
+  // Offline copies are the default; pass offline:false to opt out.
+  offline: params.offline === undefined ? true : parseBoolean(params.offline),
 });
 
 /**

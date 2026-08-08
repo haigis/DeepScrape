@@ -6,6 +6,7 @@ import { fixRelativePaths, generateOutputDir } from './fileHandler.js';
 import { captureWebpScreenshot } from './screenshot.js';
 import { handleCookieBanner } from './cookieHandler.js';
 import { waitMs } from './utils.js';
+import { downloadAssets, rewriteForOffline } from './offline.js';
 
 /**
  * Default scrape options shared by the CLI and the API.
@@ -23,6 +24,9 @@ export const defaultOptions = Object.freeze({
     maxDepth: 2,
     screenshot: false,
     downloadImages: false,
+    // Saved pages are self-contained by default: assets are downloaded
+    // and references rewritten so viewing a scan never calls the origin.
+    offline: true,
 });
 
 /**
@@ -140,7 +144,7 @@ async function downloadPageImages(page, pageUrl, imgDir) {
  * @returns {Promise<ScrapeResult>}
  */
 export async function scrapePage(browser, url, outDir, options = {}) {
-    const { screenshot, downloadImages } = resolveOptions(options);
+    const { screenshot, downloadImages, offline } = resolveOptions(options);
     console.log(`🌍 Navigating: ${url}`);
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
@@ -173,6 +177,16 @@ export async function scrapePage(browser, url, outDir, options = {}) {
 
         const savePath = path.join(outDir, buildPagePath(url));
         await fs.mkdir(path.dirname(savePath), { recursive: true });
+
+        // Make the saved copy self-contained: download the assets it needs
+        // and repoint them locally, so viewing or auditing the scan later
+        // never reaches back to the origin site.
+        if (offline) {
+            const { map, saved, failed, bytes } = await downloadAssets(
+                html, url, outDir, path.dirname(savePath));
+            html = rewriteForOffline(html, map);
+            console.log(`📦 Offline assets: ${saved} saved (${failed} failed, ${(bytes / 1024).toFixed(0)} KB)`);
+        }
 
         await fs.writeFile(savePath, `<!-- ${url} -->\n${html}`, 'utf8');
         console.log(`✅ Saved HTML: ${savePath}`);

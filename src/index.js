@@ -20,6 +20,8 @@ Options:
   -spider <url>     Crawl a domain recursively.
   --depth <n>       Spider crawl depth (default: 2).
   --images          Download page images alongside the HTML.
+  --no-offline      Keep asset URLs pointing at the live site (default is
+                    a self-contained offline copy).
   -ss               Save a full-page WebP screenshot.
   --rate-limit <ms> Set request delay (default: 1000ms).
   -h, --help        Show this help message.
@@ -30,6 +32,7 @@ Options:
     const options = resolveOptions({
         screenshot: args.includes('-ss'),
         downloadImages: args.includes('--images'),
+        offline: !args.includes('--no-offline'),
         rateLimit: args.includes('--rate-limit')
             ? parseInt(getFlagValue(args, '--rate-limit'), 10)
             : undefined,
