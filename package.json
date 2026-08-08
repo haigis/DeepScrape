@@ -1,32 +1,31 @@
 {
-  "name": "DeepScrape",
-  "version": "1.0.0",
+  "name": "deepscrape",
+  "version": "1.1.0",
   "description": "A web scraping tool with modular design and API support",
   "type": "module",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/index.js",
     "api": "node src/api.js",
-    "test": "echo \"No tests defined\" && exit 1",
-    "audit": "node src/accessibility.js"
+    "audit": "node src/accessibility.js",
+    "test": "echo \"No tests defined\" && exit 1"
   },
   "keywords": [
     "web scraping",
     "automation",
     "puppeteer",
-    "cheerio"
+    "accessibility"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "haigis",
+  "license": "MIT",
   "dependencies": {
     "axe-core": "^4.10.3",
     "axios": "^1.7.8",
-    "cheerio": "^1.0.0",
-    "cli-progress": "^3.12.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "fs": "^0.0.1-security",
-    "path": "^0.12.7",
     "puppeteer": "^24.4.0",
     "sharp": "^0.33.5",
     "xml2js": "^0.6.2"
