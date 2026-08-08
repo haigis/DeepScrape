@@ -152,6 +152,9 @@
     <div id="spiderField" class="form-group" style="display: none;">
       <label for="maxDepth">Max Depth (Spider Mode Only):</label>
       <input type="number" id="maxDepth" value="2">
+
+      <label for="pathPrefix">Folder / path prefix (Spider Mode Only):</label>
+      <input type="text" id="pathPrefix" placeholder="e.g. /help — blank scans the whole site">
     </div>
 
     <div class="form-group switch-container">
@@ -251,6 +254,9 @@
           endpoint = "/scrape/spider";
           requestBody.url = inputUrl;
           requestBody.maxDepth = maxDepth;
+          // Optional folder scope: only this subtree is crawled.
+          const pathPrefix = document.getElementById("pathPrefix").value.trim();
+          if (pathPrefix) requestBody.pathPrefix = pathPrefix;
           break;
         case "batch":
           endpoint = "/scrape/batch";
@@ -303,6 +309,7 @@
       const p = job.params;
       const bits = [`rate ${p.rateLimit}ms`];
       if (job.type === "spider") bits.push(`depth ${p.maxDepth}`);
+      if (p.pathPrefix) bits.push(`scope ${p.pathPrefix}`);
       if (p.screenshot) bits.push("📸");
       if (p.downloadImages) bits.push("🖼");
       return bits.join(" · ");

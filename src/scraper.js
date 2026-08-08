@@ -268,7 +268,7 @@ export async function processFile(filePath, ignoreUrls = []) {
  */
 export async function processUrls(urls, options = {}) {
     const opts = resolveOptions(options);
-    const { onProgress, signal } = options;
+    const { onProgress, signal, gate } = options;
     console.log(`🚀 Processing ${urls.length} URLs...`);
     console.log(`🖼 Screenshot: ${opts.screenshot ? 'Enabled' : 'Disabled'}`);
     console.log(`📥 Download Images: ${opts.downloadImages ? 'Enabled' : 'Disabled'}`);
@@ -278,6 +278,8 @@ export async function processUrls(urls, options = {}) {
     let failed = 0;
 
     for (const url of urls) {
+        // Yield to any priority job waiting to preempt this one.
+        await gate?.wait();
         if (signal?.aborted) {
             console.log('⏹ Aborted — stopping before remaining URLs.');
             break;

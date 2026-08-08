@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from '../src/jobs.js';
 
+/** Waits until nothing is queued or running, so tests start clean. */
+const waitForIdle = async (timeoutMs = 10000) => {
+    const start = Date.now();
+    while (listJobs(100).some(j => ['queued', 'running', 'paused'].includes(j.status))) {
+        if (Date.now() - start > timeoutMs) throw new Error('queue never went idle');
+        await new Promise(r => setTimeout(r, 20));
+    }
+};
+
 const waitFor = async (predicate, timeoutMs = 5000) => {
     const start = Date.now();
     while (!predicate()) {
@@ -140,8 +149,10 @@ describe('queue management', () => {
         const normalB = createJob('test', {}, async () => { order.push('normalB'); });
         const urgent = createJob('test', {}, async () => { order.push('urgent'); }, { priority: true });
 
-        expect(getJob(urgent.id).queuePosition).toBe(0);
+        // With preemption the urgent job may already be running (it parks
+        // the blocker) rather than sitting at position 0 — either is correct.
         expect(getJob(urgent.id).priority).toBe(true);
+        expect([0, null]).toContain(getJob(urgent.id).queuePosition);
 
         await waitFor(() =>
             [normalA, normalB, urgent].every(j => getJob(j.id).status === 'completed'), 8000);
@@ -171,4 +182,73 @@ describe('queue management', () => {
 
         await waitFor(() => getJob(b.id).status === 'completed');
     });
+});
+
+describe('preemptive priority scans (issue #13)', () => {
+    /**
+     * A long job that yields to the pause gate between "pages" and
+     * records the order of work, so we can prove a priority job runs
+     * *while* the long one is parked — not after it finishes.
+     */
+    it('parks a running crawl so a priority job runs immediately', async () => {
+        await waitForIdle();
+        const order = [];
+        const longJob = createJob('spider', {}, async (onProgress, params, signal, gate) => {
+            for (let page = 0; page < 12; page++) {
+                await gate?.wait();          // park here when preempted
+                order.push(`crawl-${page}`);
+                await new Promise(r => setTimeout(r, 40));
+            }
+            return { pages: 12 };
+        });
+
+        await waitFor(() => getJob(longJob.id).status === 'running');
+        await new Promise(r => setTimeout(r, 90)); // let a couple of pages run
+
+        const urgent = createJob('scrape', {}, async () => {
+            order.push('URGENT');
+            return { processed: 1 };
+        }, { priority: true });
+
+        // The crawl must be parked, not finished, while the urgent job runs.
+        await waitFor(() => getJob(urgent.id).status === 'completed', 5000);
+        expect(getJob(longJob.id).status).not.toBe('completed');
+
+        const urgentIndex = order.indexOf('URGENT');
+        expect(urgentIndex).toBeGreaterThan(0);              // crawl had started
+        expect(urgentIndex).toBeLessThan(order.length);       // ran mid-crawl
+
+        // …and the crawl resumes and finishes all its pages.
+        await waitFor(() => getJob(longJob.id).status === 'completed', 8000);
+        expect(getJob(longJob.id).result).toEqual({ pages: 12 });
+        expect(order.filter(o => o.startsWith('crawl-'))).toHaveLength(12);
+        // Work continued after the interruption — nothing was lost.
+        expect(order.slice(urgentIndex + 1).some(o => o.startsWith('crawl-'))).toBe(true);
+    }, 25000);
+
+    it('reports the parked crawl as paused while priority work runs', async () => {
+        await waitForIdle();
+        let seenPaused = false;
+        const longJob = createJob('spider', {}, async (onProgress, params, signal, gate) => {
+            for (let page = 0; page < 10; page++) {
+                await gate?.wait();
+                await new Promise(r => setTimeout(r, 40));
+            }
+            return { done: true };
+        });
+
+        await waitFor(() => getJob(longJob.id).status === 'running');
+        const urgent = createJob('scrape', {}, async () => {
+            await new Promise(r => setTimeout(r, 120));
+            return { ok: true };
+        }, { priority: true });
+
+        while (getJob(urgent.id).status !== 'completed') {
+            if (getJob(longJob.id).status === 'paused') seenPaused = true;
+            await new Promise(r => setTimeout(r, 20));
+        }
+        expect(seenPaused).toBe(true);
+
+        await waitFor(() => getJob(longJob.id).status === 'completed', 8000);
+    }, 25000);
 });

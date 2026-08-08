@@ -45,6 +45,8 @@ const parseBoolean = (value) => {
 const paramsToOptions = (params) => ({
   rateLimit: Number(params.rateLimit) || 1000,
   maxDepth: Number(params.maxDepth) || 2,
+  // Optional folder scope, e.g. "/help" — only that subtree is crawled.
+  pathPrefix: params.pathPrefix || null,
   screenshot: parseBoolean(params.screenshot),
   downloadImages: parseBoolean(params.downloadImages),
   // Offline copies are the default; pass offline:false to opt out.
@@ -127,7 +129,7 @@ app.post('/scrape/sitemap', (req, res) => {
   const job = createJob(
     'sitemap',
     { sitemapUrl, ignoreUrls, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
-    async (onProgress, params, signal) => {
+    async (onProgress, params, signal, gate) => {
       let urls = await fetchSitemapUrls(params.sitemapUrl);
 
       const ignores = params.ignoreUrls ?? [];
@@ -138,7 +140,7 @@ app.post('/scrape/sitemap', (req, res) => {
 
       if (urls.length === 0) throw new Error('No valid URLs found in sitemap.');
 
-      const summary = await processUrls(urls, { ...paramsToOptions(params), onProgress, signal });
+      const summary = await processUrls(urls, { ...paramsToOptions(params), onProgress, signal, gate });
       return { ...summary, outputDir: generateOutputDir(urls[0]) };
     });
 
@@ -150,14 +152,14 @@ app.post('/scrape/sitemap', (req, res) => {
  * Performs a spider crawl.
  */
 app.post('/scrape/spider', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const job = createJob(
     'spider',
-    { url, rateLimit, maxDepth, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
-    (onProgress, params, signal) =>
-      spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal }));
+    { url, rateLimit, maxDepth, pathPrefix, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    (onProgress, params, signal, gate) =>
+      spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal, gate }));
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
@@ -186,8 +188,8 @@ app.post('/scrape/batch', async (req, res) => {
   const job = createJob(
     'batch',
     { urls: cleaned, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
-    (onProgress, params, signal) =>
-      processUrls(params.urls, { ...paramsToOptions(params), onProgress, signal }));
+    (onProgress, params, signal, gate) =>
+      processUrls(params.urls, { ...paramsToOptions(params), onProgress, signal, gate }));
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, queuedUrls: cleaned.length });
 });

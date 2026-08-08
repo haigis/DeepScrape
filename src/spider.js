@@ -44,7 +44,27 @@ const normalizeUrl = (url) => {
 export async function spiderCrawl(startUrls, options = {}) {
     const opts = resolveOptions(options);
     const { rateLimit, maxDepth } = opts;
-    const { onProgress, signal } = options;
+    const { onProgress, signal, gate } = options;
+
+    /**
+     * Optional path scope: when set, only URLs under this prefix are
+     * crawled, so a customer can scan just /help instead of a whole
+     * 10,000-page site. Normalised to a leading slash, no trailing one.
+     */
+    const pathPrefix = options.pathPrefix
+        ? '/' + String(options.pathPrefix).trim().replace(/^\/+|\/+$/g, '')
+        : null;
+
+    /** True when a URL sits inside the scoped folder (or no scope is set). */
+    const inScope = (url) => {
+        if (!pathPrefix) return true;
+        try {
+            const { pathname } = new URL(url);
+            return pathname === pathPrefix || pathname.startsWith(pathPrefix + '/');
+        } catch {
+            return false;
+        }
+    };
 
     if (!startUrls || startUrls.length === 0) {
         console.error('❌ Error: spiderCrawl received an empty startUrls array.');
@@ -61,7 +81,8 @@ export async function spiderCrawl(startUrls, options = {}) {
 
     await fs.mkdir(outDir, { recursive: true });
 
-    console.log(`🕷️ Starting spider crawl on: ${startUrls[0]} (maxDepth: ${maxDepth})`);
+    console.log(`🕷️ Starting spider crawl on: ${startUrls[0]} (maxDepth: ${maxDepth}`
+        + `${pathPrefix ? `, scoped to ${pathPrefix}` : ''})`);
 
     const visited = new Set();
     const queued = new Set();
@@ -83,6 +104,9 @@ export async function spiderCrawl(startUrls, options = {}) {
     const browser = await getBrowser();
 
     while (queue.length) {
+        // Park here when a priority job needs the runner — the crawl
+        // resumes from this exact point, losing no work.
+        await gate?.wait();
         if (signal?.aborted) {
             console.log('⏹ Aborted — stopping crawl.');
             break;
@@ -123,7 +147,7 @@ export async function spiderCrawl(startUrls, options = {}) {
 
             if (isImageUrl(link) || queued.has(link)) continue;
 
-            if (new URL(link).hostname === domain && depth < maxDepth) {
+            if (new URL(link).hostname === domain && inScope(link) && depth < maxDepth) {
                 queued.add(link);
                 queue.push({ url: link, depth: depth + 1 });
             }
