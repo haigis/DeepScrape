@@ -254,7 +254,7 @@ export async function processFile(filePath, ignoreUrls = []) {
  */
 export async function processUrls(urls, options = {}) {
     const opts = resolveOptions(options);
-    const { onProgress } = options;
+    const { onProgress, signal } = options;
     console.log(`🚀 Processing ${urls.length} URLs...`);
     console.log(`🖼 Screenshot: ${opts.screenshot ? 'Enabled' : 'Disabled'}`);
     console.log(`📥 Download Images: ${opts.downloadImages ? 'Enabled' : 'Disabled'}`);
@@ -264,6 +264,10 @@ export async function processUrls(urls, options = {}) {
     let failed = 0;
 
     for (const url of urls) {
+        if (signal?.aborted) {
+            console.log('⏹ Aborted — stopping before remaining URLs.');
+            break;
+        }
         onProgress?.({ done: processed + failed, total: urls.length, currentUrl: url });
         try {
             const outDir = generateOutputDir(url);
@@ -276,7 +280,7 @@ export async function processUrls(urls, options = {}) {
         if (opts.rateLimit > 0) await waitMs(opts.rateLimit);
     }
 
-    onProgress?.({ done: urls.length, total: urls.length, currentUrl: null });
-    console.log(`✅ All URLs processed (${processed} ok, ${failed} failed).`);
-    return { processed, failed, total: urls.length };
+    onProgress?.({ done: processed + failed, total: urls.length, currentUrl: null });
+    console.log(`✅ Finished (${processed} ok, ${failed} failed of ${urls.length}).`);
+    return { processed, failed, total: urls.length, aborted: signal?.aborted ?? false };
 }

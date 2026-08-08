@@ -44,7 +44,7 @@ const normalizeUrl = (url) => {
 export async function spiderCrawl(startUrls, options = {}) {
     const opts = resolveOptions(options);
     const { rateLimit, maxDepth } = opts;
-    const { onProgress } = options;
+    const { onProgress, signal } = options;
 
     if (!startUrls || startUrls.length === 0) {
         console.error('❌ Error: spiderCrawl received an empty startUrls array.');
@@ -83,6 +83,10 @@ export async function spiderCrawl(startUrls, options = {}) {
     const browser = await getBrowser();
 
     while (queue.length) {
+        if (signal?.aborted) {
+            console.log('⏹ Aborted — stopping crawl.');
+            break;
+        }
         const { url, depth } = queue.shift();
         if (visited.has(url) || isImageUrl(url)) continue;
 
@@ -138,5 +142,5 @@ export async function spiderCrawl(startUrls, options = {}) {
     await fs.writeFile(path.join(outDir, 'incoming-links.json'), JSON.stringify(incomingAsObject, null, 2), 'utf8');
 
     console.log(`📁 Saved crawl results to: ${outDir}`);
-    return { visited: visited.size, broken: brokenLinks.size, outDir };
+    return { visited: visited.size, broken: brokenLinks.size, outDir, aborted: signal?.aborted ?? false };
 }

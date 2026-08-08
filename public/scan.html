@@ -165,6 +165,34 @@
     <div id="jobStatus" style="margin-top: 15px; text-align: left; font-family: monospace; font-size: 14px; white-space: pre-wrap;"></div>
   </div>
 
+  <div class="container" style="margin-top: 20px;">
+    <h2 style="color: #007bff; font-size: 18px; margin: 0 0 12px;">Job queue</h2>
+    <div id="queuePanel" style="text-align: left; font-size: 14px;">No jobs yet.</div>
+  </div>
+
+  <style>
+    table.queue { width: 100%; border-collapse: collapse; }
+    table.queue th, table.queue td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; vertical-align: middle; }
+    table.queue th { background: #f0f4f8; }
+    .job-target { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-queued { color: #886a00; font-weight: bold; }
+    .status-running { color: #007bff; font-weight: bold; }
+    .status-completed { color: #1a8a1a; font-weight: bold; }
+    .status-failed { color: #d60000; font-weight: bold; }
+    .status-cancelled { color: #888; font-weight: bold; }
+    .qbtn {
+      width: auto; padding: 3px 8px; font-size: 13px; margin: 0 2px 2px 0;
+      background: #fff; color: #007bff; border: 1px solid #cfe0f0; border-radius: 4px; cursor: pointer;
+    }
+    .qbtn:hover { background: #eef5ff; }
+    .qbtn.danger { color: #d60000; border-color: #f0cfcf; }
+    .qbtn.danger:hover { background: #fdeeee; }
+    .edit-row td { background: #f8fbff; }
+    .edit-row label { display: inline-flex; align-items: center; gap: 4px; font-weight: normal; margin-right: 12px; font-size: 13px; }
+    .edit-row input[type=number] { width: 90px; padding: 4px; font-size: 13px; }
+    .edit-row input[type=checkbox] { width: auto; }
+  </style>
+
   <script>
     // Same-origin: the API serves this page, so relative URLs always work.
     const API_URL = "";
@@ -237,37 +265,200 @@
           return;
         }
 
-        statusEl.textContent = `⏳ Job ${data.jobId} queued…`;
-        pollJob(data.statusUrl, statusEl);
+        statusEl.textContent = `⏳ Job ${data.jobId} queued — see the queue below.`;
+        refreshQueue();
       } catch (error) {
         statusEl.textContent = "❌ Error: " + error.message;
       }
     }
 
-    async function pollJob(statusUrl, statusEl) {
-      try {
-        const response = await fetch(API_URL + statusUrl);
-        const job = await response.json();
+    // --- Job queue panel -------------------------------------------------
 
-        if (job.status === "completed") {
-          statusEl.textContent = `✅ Job completed\n${JSON.stringify(job.result, null, 2)}`;
-          return;
-        }
-        if (job.status === "failed") {
-          statusEl.textContent = `❌ Job failed: ${job.error}`;
-          return;
-        }
+    /** Job id whose edit form is open; polling skips re-render while set. */
+    let editingJobId = null;
 
-        const p = job.progress;
-        statusEl.textContent = p
-          ? `⏳ ${job.status} — ${p.done}/${p.total}${p.currentUrl ? "\n" + p.currentUrl : ""}`
-          : `⏳ ${job.status}…`;
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    };
 
-        setTimeout(() => pollJob(statusUrl, statusEl), 1500);
-      } catch (error) {
-        statusEl.textContent = "❌ Polling error: " + error.message;
-      }
+    function jobTarget(job) {
+      const p = job.params;
+      return p.url || p.sitemapUrl || (p.urls ? `${p.urls.length} URLs` : "—");
     }
+
+    function jobSettings(job) {
+      const p = job.params;
+      const bits = [`rate ${p.rateLimit}ms`];
+      if (job.type === "spider") bits.push(`depth ${p.maxDepth}`);
+      if (p.screenshot) bits.push("📸");
+      if (p.downloadImages) bits.push("🖼");
+      return bits.join(" · ");
+    }
+
+    async function jobAction(method, path, body) {
+      const response = await fetch(API_URL + path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        alert("❌ " + (err.error || response.statusText));
+      }
+      await refreshQueue(true);
+    }
+
+    function actionButtons(job, queuedIds) {
+      const td = el("td");
+      if (job.status === "queued") {
+        const pos = job.queuePosition;
+        const up = el("button", "qbtn", "▲");
+        up.title = "Run earlier";
+        up.disabled = pos === 0;
+        up.onclick = () => jobAction("POST", `/jobs/${job.id}/move`, { position: pos - 1 });
+        const down = el("button", "qbtn", "▼");
+        down.title = "Run later";
+        down.disabled = pos === queuedIds.length - 1;
+        down.onclick = () => jobAction("POST", `/jobs/${job.id}/move`, { position: pos + 1 });
+        const edit = el("button", "qbtn", "✏️ Edit");
+        edit.onclick = () => { editingJobId = editingJobId === job.id ? null : job.id; renderQueue(lastJobs); };
+        const cancel = el("button", "qbtn danger", "✖ Cancel");
+        cancel.onclick = () => jobAction("POST", `/jobs/${job.id}/cancel`);
+        td.append(up, down, edit, cancel);
+      } else if (job.status === "running") {
+        const stop = el("button", "qbtn danger", "⏹ Stop");
+        stop.onclick = () => jobAction("POST", `/jobs/${job.id}/cancel`);
+        td.appendChild(stop);
+      }
+      return td;
+    }
+
+    function editRow(job) {
+      const tr = el("tr", "edit-row");
+      const td = el("td");
+      td.colSpan = 6;
+
+      const rate = el("label", null, "Rate limit (ms) ");
+      const rateInput = el("input");
+      rateInput.type = "number";
+      rateInput.value = job.params.rateLimit;
+      rate.appendChild(rateInput);
+      td.appendChild(rate);
+
+      let depthInput = null;
+      if (job.type === "spider") {
+        const depth = el("label", null, "Max depth ");
+        depthInput = el("input");
+        depthInput.type = "number";
+        depthInput.value = job.params.maxDepth;
+        depth.appendChild(depthInput);
+        td.appendChild(depth);
+      }
+
+      const shot = el("label", null, "Screenshot");
+      const shotInput = el("input");
+      shotInput.type = "checkbox";
+      shotInput.checked = !!job.params.screenshot;
+      shot.prepend(shotInput);
+      td.appendChild(shot);
+
+      const imgs = el("label", null, "Download images");
+      const imgsInput = el("input");
+      imgsInput.type = "checkbox";
+      imgsInput.checked = !!job.params.downloadImages;
+      imgs.prepend(imgsInput);
+      td.appendChild(imgs);
+
+      const save = el("button", "qbtn", "💾 Save");
+      save.onclick = () => {
+        const patch = {
+          rateLimit: parseInt(rateInput.value, 10),
+          screenshot: shotInput.checked,
+          downloadImages: imgsInput.checked,
+        };
+        if (depthInput) patch.maxDepth = parseInt(depthInput.value, 10);
+        editingJobId = null;
+        jobAction("PATCH", `/jobs/${job.id}`, patch);
+      };
+      const discard = el("button", "qbtn", "Discard");
+      discard.onclick = () => { editingJobId = null; renderQueue(lastJobs); };
+      td.append(save, discard);
+
+      tr.appendChild(td);
+      return tr;
+    }
+
+    let lastJobs = [];
+
+    function renderQueue(jobsList) {
+      const panel = document.getElementById("queuePanel");
+      panel.innerHTML = "";
+
+      if (jobsList.length === 0) {
+        panel.textContent = "No jobs yet.";
+        return;
+      }
+
+      // Queue order first (position ascending), then running, then finished newest-first.
+      const rank = j => j.status === "running" ? -1 : (j.status === "queued" ? j.queuePosition : 1000);
+      const sorted = [...jobsList].sort((a, b) => rank(a) - rank(b) || b.createdAt.localeCompare(a.createdAt));
+      const queuedIds = sorted.filter(j => j.status === "queued").map(j => j.id);
+
+      const table = el("table", "queue");
+      const head = el("tr");
+      for (const h of ["#", "Type", "Target", "Settings", "Status", "Actions"]) head.appendChild(el("th", null, h));
+      table.appendChild(head);
+
+      for (const job of sorted) {
+        const tr = el("tr");
+        tr.appendChild(el("td", null, job.status === "queued" ? `${job.queuePosition + 1}` : (job.status === "running" ? "▶" : "")));
+        tr.appendChild(el("td", null, job.type));
+        const target = el("td", "job-target", jobTarget(job));
+        target.title = jobTarget(job);
+        tr.appendChild(target);
+        tr.appendChild(el("td", null, jobSettings(job)));
+
+        const statusTd = el("td");
+        const badge = el("span", `status-${job.status}`, job.status);
+        statusTd.appendChild(badge);
+        if (job.status === "running" && job.progress) {
+          statusTd.append(` ${job.progress.done}/${job.progress.total}`);
+        }
+        if (job.status === "completed" && job.result) {
+          const r = job.result;
+          const summary = r.visited != null
+            ? ` — ${r.visited} pages, ${r.broken} broken${r.aborted ? " (stopped early)" : ""}`
+            : ` — ${r.processed}/${r.total} ok${r.aborted ? " (stopped early)" : ""}`;
+          statusTd.append(summary);
+        }
+        if (job.status === "failed") statusTd.append(` — ${job.error}`);
+        tr.appendChild(statusTd);
+
+        tr.appendChild(actionButtons(job, queuedIds));
+        table.appendChild(tr);
+
+        if (editingJobId === job.id && job.status === "queued") {
+          table.appendChild(editRow(job));
+        }
+      }
+      panel.appendChild(table);
+    }
+
+    async function refreshQueue(force = false) {
+      if (editingJobId && !force) return; // don't wipe an open edit form
+      try {
+        const response = await fetch(`${API_URL}/jobs`);
+        if (!response.ok) return;
+        lastJobs = (await response.json()).jobs || [];
+        if (!editingJobId || force) renderQueue(lastJobs);
+      } catch { /* API briefly unreachable — try again next tick */ }
+    }
+
+    refreshQueue();
+    setInterval(refreshQueue, 2000);
   </script>
 </body>
 </html>

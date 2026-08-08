@@ -6,7 +6,7 @@ import { processUrls } from './scraper.js';
 import { fetchSitemapUrls } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
-import { createJob, getJob, listJobs } from './jobs.js';
+import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
 import { buildScanTree, getPageDetails, getPageHistory } from './scanStore.js';
 
 const app = express();
@@ -36,6 +36,16 @@ app.use(express.static('public'));
 const parseBoolean = (value) => {
   return value === true || value === 'true';
 };
+
+/**
+ * Builds ScrapeOptions from a job's (possibly edited) params.
+ */
+const paramsToOptions = (params) => ({
+  rateLimit: Number(params.rateLimit) || 1000,
+  maxDepth: Number(params.maxDepth) || 2,
+  screenshot: parseBoolean(params.screenshot),
+  downloadImages: parseBoolean(params.downloadImages),
+});
 
 /**
  * Resolves a user-supplied scan identifier ("domain/date") to a path
@@ -89,14 +99,12 @@ app.post('/scrape', (req, res) => {
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const outDir = generateOutputDir(url);
-  const options = {
-    rateLimit,
-    screenshot: parseBoolean(screenshot),
-    downloadImages: parseBoolean(downloadImages),
-  };
 
-  const job = createJob('scrape', { url, ...options }, onProgress =>
-    processUrls([url], { ...options, onProgress }));
+  const job = createJob(
+    'scrape',
+    { url, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    (onProgress, params, signal) =>
+      processUrls([params.url], { ...paramsToOptions(params), onProgress, signal }));
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, outputDir: outDir });
 });
@@ -111,25 +119,23 @@ app.post('/scrape/sitemap', (req, res) => {
   const ignoreUrls = req.body.ignoreUrls ?? req.body.excludeUrls ?? [];
   if (!sitemapUrl) return res.status(400).json({ error: 'Sitemap URL is required' });
 
-  const options = {
-    rateLimit,
-    screenshot: parseBoolean(screenshot),
-    downloadImages: parseBoolean(downloadImages),
-  };
+  const job = createJob(
+    'sitemap',
+    { sitemapUrl, ignoreUrls, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    async (onProgress, params, signal) => {
+      let urls = await fetchSitemapUrls(params.sitemapUrl);
 
-  const job = createJob('sitemap', { sitemapUrl, ignoreUrls, ...options }, async onProgress => {
-    let urls = await fetchSitemapUrls(sitemapUrl);
+      const ignores = params.ignoreUrls ?? [];
+      if (ignores.length > 0) {
+        urls = urls.filter(url => !ignores.some(ignore => url.includes(ignore)));
+        console.log(`🚫 Ignored ${ignores.length} URL patterns`);
+      }
 
-    if (ignoreUrls.length > 0) {
-      urls = urls.filter(url => !ignoreUrls.some(ignore => url.includes(ignore)));
-      console.log(`🚫 Ignored ${ignoreUrls.length} URL patterns`);
-    }
+      if (urls.length === 0) throw new Error('No valid URLs found in sitemap.');
 
-    if (urls.length === 0) throw new Error('No valid URLs found in sitemap.');
-
-    const summary = await processUrls(urls, { ...options, onProgress });
-    return { ...summary, outputDir: generateOutputDir(urls[0]) };
-  });
+      const summary = await processUrls(urls, { ...paramsToOptions(params), onProgress, signal });
+      return { ...summary, outputDir: generateOutputDir(urls[0]) };
+    });
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
@@ -142,15 +148,11 @@ app.post('/scrape/spider', (req, res) => {
   const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
-  const options = {
-    rateLimit,
-    maxDepth,
-    screenshot: parseBoolean(screenshot),
-    downloadImages: parseBoolean(downloadImages),
-  };
-
-  const job = createJob('spider', { url, ...options }, onProgress =>
-    spiderCrawl([url], { ...options, onProgress }));
+  const job = createJob(
+    'spider',
+    { url, rateLimit, maxDepth, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    (onProgress, params, signal) =>
+      spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal }));
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
@@ -176,14 +178,11 @@ app.post('/scrape/batch', async (req, res) => {
 
   if (cleaned.length === 0) return res.status(400).json({ error: 'No valid http(s) URLs in list.' });
 
-  const options = {
-    rateLimit,
-    screenshot: parseBoolean(screenshot),
-    downloadImages: parseBoolean(downloadImages),
-  };
-
-  const job = createJob('batch', { urls: cleaned, ...options }, onProgress =>
-    processUrls(cleaned, { ...options, onProgress }));
+  const job = createJob(
+    'batch',
+    { urls: cleaned, rateLimit, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    (onProgress, params, signal) =>
+      processUrls(params.urls, { ...paramsToOptions(params), onProgress, signal }));
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, queuedUrls: cleaned.length });
 });
@@ -204,6 +203,54 @@ app.get('/jobs/:id', (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job);
+});
+
+/**
+ * POST /jobs/:id/cancel
+ * Cancels a queued job or stops the running one (aborts at the next
+ * page boundary).
+ */
+app.post('/jobs/:id/cancel', (req, res) => {
+  const result = cancelJob(req.params.id);
+  if (!result.ok) return res.status(409).json({ error: result.error });
+  res.json({ success: true, job: getJob(req.params.id) });
+});
+
+/**
+ * POST /jobs/:id/move { position }
+ * Moves a queued job to a new position among queued jobs (0 = next).
+ */
+app.post('/jobs/:id/move', (req, res) => {
+  const result = moveJob(req.params.id, req.body?.position);
+  if (!result.ok) return res.status(409).json({ error: result.error });
+  res.json({ success: true });
+});
+
+/**
+ * PATCH /jobs/:id
+ * Edits settings of a queued job. Whitelisted keys only.
+ */
+app.patch('/jobs/:id', (req, res) => {
+  const allowed = ['rateLimit', 'maxDepth', 'screenshot', 'downloadImages'];
+  const patch = {};
+  for (const key of allowed) {
+    if (key in (req.body ?? {})) {
+      patch[key] = key === 'rateLimit' || key === 'maxDepth'
+        ? Number(req.body[key])
+        : parseBoolean(req.body[key]);
+    }
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: `No editable fields supplied (allowed: ${allowed.join(', ')})` });
+  }
+  if ((('rateLimit' in patch) && !Number.isFinite(patch.rateLimit)) ||
+      (('maxDepth' in patch) && !Number.isFinite(patch.maxDepth))) {
+    return res.status(400).json({ error: 'rateLimit and maxDepth must be numbers' });
+  }
+
+  const result = updateJob(req.params.id, patch);
+  if (!result.ok) return res.status(409).json({ error: result.error });
+  res.json({ success: true, job: result.job });
 });
 
 /**
