@@ -2,7 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { buildScanTree, getPageDetails, getPageHistory, readPageUrl } from '../src/scanStore.js';
+import {
+    buildScanTree, getPageDetails, getPageHistory, readPageUrl,
+    extractAnchors, urlToScanPath,
+} from '../src/scanStore.js';
 
 let root;        // temp output/<domain>
 let scanA;       // output/<domain>/2026-08-01
@@ -23,13 +26,22 @@ beforeAll(async () => {
     await write(scanA, 'bank.example/index.html', '<!-- https://bank.example/ -->\n<html>old</html>');
 
     // Newer scan: nested structure, screenshots, artifacts, images.
-    await write(scanB, 'bank.example/index.html', '<!-- https://bank.example/ -->\n<html><a href="https://bank.example/loans/personal.html">x</a><a href="https://other.example/">y</a></html>');
+    await write(scanB, 'bank.example/index.html',
+        '<!-- https://bank.example/ -->\n<html>'
+        + '<a href="https://bank.example/loans/personal">Personal loans</a>'
+        + '<a href="https://bank.example/loans/personal#rates">Personal loans</a>'
+        + '<a href="https://bank.example/missing-page">Not scraped</a>'
+        + '<a href="https://other.example/" rel="nofollow">Partner site</a>'
+        + '<a href="https://other.example/terms"><span>Terms</span></a>'
+        + '<a href="https://cdn.example/asset">CDN</a>'
+        + '</html>');
     await write(scanB, 'bank.example/index.webp', 'webp-bytes');
     await write(scanB, 'bank.example/loans/personal.html', '<!-- https://bank.example/loans/personal -->\n<html>p</html>');
     await write(scanB, 'bank.example/loans/mortgages/fixed.html', '<!-- https://bank.example/loans/mortgages/fixed -->\n<html>f</html>');
     await write(scanB, 'bank.example/images/logo.png', 'png');
     await write(scanB, 'all-links.txt', 'https://bank.example/a\nhttps://bank.example/b');
-    await write(scanB, 'broken-links.txt', 'https://bank.example/dead\nhttps://bank.example/gone');
+    await write(scanB, 'broken-links.txt',
+        'https://bank.example/dead\nhttps://bank.example/gone\nhttps://bank.example/missing-page');
     await write(scanB, 'incoming-links.json', JSON.stringify({
         'https://bank.example/loans/personal': ['https://bank.example/'],
     }));
@@ -58,7 +70,7 @@ describe('buildScanTree', () => {
         expect(stats.pages).toBe(3);
         expect(stats.screenshots).toBe(1);
         expect(stats.images).toBe(1);
-        expect(stats.brokenLinks).toBe(2);
+        expect(stats.brokenLinks).toBe(3);
         expect(stats.artifacts.sort()).toEqual(['all-links.txt', 'broken-links.txt', 'incoming-links.json']);
 
         expect(tree.pages).toBe(3);
@@ -75,20 +87,81 @@ describe('buildScanTree', () => {
     });
 });
 
+describe('extractAnchors', () => {
+    it('captures href, visible text and rel, stripping nested markup', () => {
+        const anchors = extractAnchors('<a href="https://x.example/a" rel="NOFOLLOW"><span>Hello</span> world</a>');
+        expect(anchors).toEqual([{ href: 'https://x.example/a', text: 'Hello world', rel: 'nofollow' }]);
+    });
+
+    it('ignores non-http hrefs and anchors without href', () => {
+        const anchors = extractAnchors('<a href="mailto:a@b.c">mail</a><a>plain</a><a href="/rel">rel</a>');
+        expect(anchors).toEqual([]);
+    });
+});
+
+describe('urlToScanPath', () => {
+    it('maps URLs to their saved location', () => {
+        expect(urlToScanPath('https://bank.example/')).toBe('bank.example/index.html');
+        expect(urlToScanPath('https://bank.example/loans/personal')).toBe('bank.example/loans/personal.html');
+        expect(urlToScanPath('not a url')).toBeNull();
+    });
+});
+
 describe('getPageDetails', () => {
     it('returns url, size, screenshot, incoming and outgoing links', async () => {
         const d = await getPageDetails(scanB, 'bank.example/2026-08-08', 'bank.example/index.html');
         expect(d.url).toBe('https://bank.example/');
         expect(d.size).toBeGreaterThan(0);
         expect(d.screenshotUrl).toBe('/output/bank.example/2026-08-08/bank.example/index.webp');
-        expect(d.outgoing).toContain('https://bank.example/loans/personal.html');
-        expect(d.outgoing).toContain('https://other.example/');
+        expect(d.outgoing).toContain('https://bank.example/loans/personal');
+        expect(d.outgoing).toContain('https://other.example');
     });
 
-    it('maps incoming links via incoming-links.json', async () => {
+    it('splits outgoing links into internal and external with status', async () => {
+        const { links } = await getPageDetails(scanB, 'bank.example/2026-08-08', 'bank.example/index.html');
+
+        const personal = links.internal.find(l => l.url.endsWith('/loans/personal'));
+        expect(personal.text).toBe('Personal loans');
+        expect(personal.scraped).toBe(true);
+        expect(personal.broken).toBe(false);
+        expect(personal.pageUrl).toContain('page.html?scan=');
+        // /loans/personal and /loans/personal#rates collapse to one target
+        expect(personal.occurrences).toBe(2);
+
+        const missing = links.internal.find(l => l.url.endsWith('/missing-page'));
+        expect(missing.scraped).toBe(false);
+        expect(missing.broken).toBe(true);
+        expect(missing.pageUrl).toBeNull();
+
+        expect(links.external.map(l => l.host).sort())
+            .toEqual(['cdn.example', 'other.example', 'other.example']);
+        const partner = links.external.find(l => l.url === 'https://other.example');
+        expect(partner.nofollow).toBe(true);
+        // anchor text survives nested markup
+        expect(links.external.find(l => l.url.endsWith('/terms')).text).toBe('Terms');
+    });
+
+    it('groups external links by host, most-linked first', async () => {
+        const { links } = await getPageDetails(scanB, 'bank.example/2026-08-08', 'bank.example/index.html');
+        expect(links.externalHosts).toEqual([
+            { host: 'other.example', count: 2 },
+            { host: 'cdn.example', count: 1 },
+        ]);
+        expect(links.counts.brokenOut).toBe(1);
+        expect(links.counts.nofollow).toBe(1);
+    });
+
+    it('resolves incoming links with the anchor text the source used', async () => {
         const d = await getPageDetails(scanB, 'bank.example/2026-08-08', 'bank.example/loans/personal.html');
         expect(d.incoming).toEqual(['https://bank.example/']);
         expect(d.screenshotUrl).toBeNull();
+
+        const [source] = d.links.incoming;
+        expect(source.url).toBe('https://bank.example/');
+        expect(source.scraped).toBe(true);
+        expect(source.anchorTexts).toEqual(['Personal loans']);
+        expect(source.occurrences).toBe(2); // plain + #rates anchor
+        expect(source.pageUrl).toContain('bank.example%2Findex.html');
     });
 
     it('returns null for missing pages', async () => {

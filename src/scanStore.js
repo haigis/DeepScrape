@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { buildPagePath } from './scraper.js';
 
 /**
  * Read access to scan output on disk: directory trees, per-page details
@@ -8,6 +9,56 @@ import path from 'path';
  */
 
 const ARTIFACT_NAMES = new Set(['all-links.txt', 'broken-links.txt', 'incoming-links.json']);
+
+/** Caps to keep a single page view cheap on very large pages. */
+const MAX_LINKS_ANALYZED = 500;
+const MAX_INCOMING_ANALYZED = 100;
+
+/**
+ * Extracts anchors from saved HTML: href, visible text and rel.
+ * Saved pages have absolute hrefs (fixRelativePaths runs at scrape time).
+ * @param {string} html
+ * @returns {{href: string, text: string, rel: string}[]}
+ */
+export function extractAnchors(html) {
+    const anchors = [];
+    for (const match of html.matchAll(/<a\s([^>]*?)>([\s\S]*?)<\/a>/gi)) {
+        const [, attrs, inner] = match;
+        const href = attrs.match(/href\s*=\s*"([^"]*)"/i)?.[1]
+            ?? attrs.match(/href\s*=\s*'([^']*)'/i)?.[1];
+        if (!href || !/^https?:\/\//i.test(href)) continue;
+
+        const text = inner
+            .replace(/<[^>]*>/g, ' ')       // strip nested markup (spans, imgs…)
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 120);
+
+        anchors.push({
+            href,
+            text,
+            rel: attrs.match(/rel\s*=\s*"([^"]*)"/i)?.[1]?.toLowerCase() ?? '',
+        });
+    }
+    return anchors;
+}
+
+/**
+ * Maps an absolute URL to the path it would occupy inside a scan
+ * directory, using the same rule the scraper saves with.
+ * @param {string} url
+ * @returns {string|null}
+ */
+export function urlToScanPath(url) {
+    try {
+        return buildPagePath(url).replace(/\\/g, '/');
+    } catch {
+        return null;
+    }
+}
+
+const stripTrailingSlash = (url) => url.replace(/\/+$/, '');
 
 /**
  * Reads the original URL from a saved page (first line: <!-- url -->).
@@ -118,24 +169,17 @@ export async function getPageDetails(scanPath, scan, pagePath) {
     const webpRel = pagePath.replace(/\.html?$/i, '.webp');
     const hasScreenshot = await fs.access(path.join(scanPath, webpRel)).then(() => true, () => false);
 
-    // Outgoing links from the saved HTML (absolute after fixRelativePaths).
-    let outgoing = [];
-    try {
-        const html = await fs.readFile(absPage, 'utf8');
-        outgoing = [...new Set(
-            [...html.matchAll(/href="(https?:\/\/[^"]+)"/g)].map(m => m[1])
-        )].slice(0, 300);
-    } catch { /* unreadable page — leave outgoing empty */ }
+    const selfHost = url ? new URL(url).hostname : pagePath.split('/')[0];
 
-    // Incoming links from the crawl's incoming-links.json, keyed by URL.
-    let incoming = [];
-    if (url) {
-        try {
-            const raw = await fs.readFile(path.join(scanPath, 'incoming-links.json'), 'utf8');
-            const map = JSON.parse(raw);
-            incoming = map[url] ?? map[url.replace(/\/$/, '')] ?? map[url + '/'] ?? [];
-        } catch { /* not a spider scan */ }
-    }
+    // Broken links recorded by the crawl, for flagging outgoing targets.
+    let brokenSet = new Set();
+    try {
+        const raw = await fs.readFile(path.join(scanPath, 'broken-links.txt'), 'utf8');
+        brokenSet = new Set(raw.split('\n').map(l => stripTrailingSlash(l.trim())).filter(Boolean));
+    } catch { /* no crawl artifacts */ }
+
+    const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url);
+    const incomingDetailed = await analyzeIncoming(scanPath, scan, url);
 
     return {
         scan,
@@ -145,9 +189,155 @@ export async function getPageDetails(scanPath, scan, pagePath) {
         modified: stat.mtime.toISOString(),
         htmlUrl: `/output/${scan}/${pagePath}`,
         screenshotUrl: hasScreenshot ? `/output/${scan}/${webpRel}` : null,
-        incoming,
-        outgoing,
+        // Plain URL lists kept for callers that only need counts.
+        incoming: incomingDetailed.map(i => i.url),
+        outgoing: [...links.internal.map(l => l.url), ...links.external.map(l => l.url)],
+        links: {
+            incoming: incomingDetailed,
+            internal: links.internal,
+            external: links.external,
+            externalHosts: links.externalHosts,
+            counts: {
+                incoming: incomingDetailed.length,
+                internal: links.internal.length,
+                external: links.external.length,
+                externalHosts: links.externalHosts.length,
+                brokenOut: links.internal.filter(l => l.broken).length,
+                notScraped: links.internal.filter(l => !l.scraped && !l.broken).length,
+                nofollow: [...links.internal, ...links.external].filter(l => l.nofollow).length,
+                truncated: links.truncated,
+            },
+        },
     };
+}
+
+/**
+ * Parses a saved page's anchors into internal/external links, resolving
+ * internal targets to their place in the scan (scraped? broken?) and
+ * grouping external links by host.
+ */
+async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl) {
+    let anchors;
+    try {
+        anchors = extractAnchors(await fs.readFile(absPage, 'utf8'));
+    } catch {
+        return { internal: [], external: [], externalHosts: [], truncated: false };
+    }
+
+    // Dedupe by URL, keeping the first non-empty anchor text and
+    // counting how often the page links to the same target.
+    const byUrl = new Map();
+    for (const anchor of anchors) {
+        const clean = stripTrailingSlash(anchor.href.split('#')[0]);
+        if (!clean || (selfUrl && clean === stripTrailingSlash(selfUrl))) continue;
+        const existing = byUrl.get(clean);
+        if (existing) {
+            existing.occurrences++;
+            if (!existing.text && anchor.text) existing.text = anchor.text;
+        } else {
+            byUrl.set(clean, {
+                url: clean,
+                text: anchor.text,
+                nofollow: anchor.rel.includes('nofollow'),
+                occurrences: 1,
+            });
+        }
+    }
+
+    const all = [...byUrl.values()];
+    const truncated = all.length > MAX_LINKS_ANALYZED;
+    const internal = [];
+    const external = [];
+    const hostCounts = new Map();
+
+    for (const link of all.slice(0, MAX_LINKS_ANALYZED)) {
+        let host;
+        try {
+            host = new URL(link.url).hostname;
+        } catch {
+            continue;
+        }
+
+        if (host === selfHost) {
+            const rel = urlToScanPath(link.url);
+            const scraped = rel
+                ? await fs.access(path.join(scanPath, rel)).then(() => true, () => false)
+                : false;
+            internal.push({
+                ...link,
+                host,
+                path: rel,
+                scraped,
+                broken: brokenSet.has(link.url),
+                pageUrl: scraped && rel
+                    ? `/page.html?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(rel)}`
+                    : null,
+            });
+        } else {
+            external.push({ ...link, host });
+            hostCounts.set(host, (hostCounts.get(host) ?? 0) + 1);
+        }
+    }
+
+    const externalHosts = [...hostCounts.entries()]
+        .map(([host, count]) => ({ host, count }))
+        .sort((a, b) => b.count - a.count || a.host.localeCompare(b.host));
+
+    internal.sort((a, b) => Number(b.broken) - Number(a.broken) || a.url.localeCompare(b.url));
+    external.sort((a, b) => a.host.localeCompare(b.host) || a.url.localeCompare(b.url));
+
+    return { internal, external, externalHosts, truncated };
+}
+
+/**
+ * Resolves the pages that link to this one, recovering the anchor text
+ * each source used and linking through to the source's own dashboard.
+ */
+async function analyzeIncoming(scanPath, scan, url) {
+    if (!url) return [];
+
+    let sources = [];
+    try {
+        const map = JSON.parse(await fs.readFile(path.join(scanPath, 'incoming-links.json'), 'utf8'));
+        sources = map[url] ?? map[stripTrailingSlash(url)] ?? map[url + '/'] ?? [];
+    } catch {
+        return []; // not a spider scan
+    }
+
+    const target = stripTrailingSlash(url);
+    const results = [];
+
+    for (const sourceUrl of sources.slice(0, MAX_INCOMING_ANALYZED)) {
+        const rel = urlToScanPath(sourceUrl);
+        const entry = {
+            url: sourceUrl,
+            path: rel,
+            anchorTexts: [],
+            occurrences: 0,
+            nofollow: false,
+            scraped: false,
+            pageUrl: null,
+        };
+
+        if (rel) {
+            const abs = path.join(scanPath, rel);
+            try {
+                const anchors = extractAnchors(await fs.readFile(abs, 'utf8'))
+                    .filter(a => stripTrailingSlash(a.href.split('#')[0]) === target);
+                entry.scraped = true;
+                entry.occurrences = anchors.length;
+                entry.nofollow = anchors.length > 0 && anchors.every(a => a.rel.includes('nofollow'));
+                entry.anchorTexts = [...new Set(anchors.map(a => a.text).filter(Boolean))].slice(0, 5);
+                entry.pageUrl = `/page.html?scan=${encodeURIComponent(scan)}&path=${encodeURIComponent(rel)}`;
+            } catch { /* source page not saved in this scan */ }
+        }
+
+        results.push(entry);
+    }
+
+    // Sources that actually name the page (anchor text) first.
+    results.sort((a, b) => b.anchorTexts.length - a.anchorTexts.length || a.url.localeCompare(b.url));
+    return results;
 }
 
 /**

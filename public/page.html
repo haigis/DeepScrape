@@ -98,21 +98,70 @@
     .delta-down { color: #1a8a1a; }
     .delta-none { color: #999; }
 
-    .linkbox {
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      max-height: 260px;
-      overflow-y: auto;
-      padding: 10px 14px;
-      font-size: 13px;
-      line-height: 1.8;
+    /* Link analysis */
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .tab {
+      background: #fff; border: 1px solid #cfe0f0; border-radius: 5px;
+      padding: 6px 12px; font-size: 13px; color: #007bff; cursor: pointer;
     }
-    .linkbox a { color: #007bff; text-decoration: none; display: block; word-break: break-all; }
-    .linkbox a:hover { text-decoration: underline; }
-    .linkbox .empty { color: #999; }
-    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+    .tab:hover { background: #eef5ff; }
+    .tab.active { background: #007bff; color: #fff; border-color: #007bff; }
+    .tab .n { opacity: 0.75; margin-left: 4px; }
+
+    .linkfilter {
+      width: 100%; padding: 7px; border: 1px solid #ccc;
+      border-radius: 5px; font-size: 13px; margin-bottom: 10px;
+    }
+    table.links {
+      width: 100%; border-collapse: collapse; background: #fff;
+      border-radius: 8px; overflow: hidden; box-shadow: 0 2px 5px rgba(0,0,0,0.06);
+    }
+    table.links th, table.links td {
+      padding: 8px 10px; border-bottom: 1px solid #eee;
+      text-align: left; font-size: 13px; vertical-align: top;
+    }
+    table.links th { background: #f0f4f8; color: #234; white-space: nowrap; }
+    table.links td.url { word-break: break-all; }
+    table.links a { color: #007bff; text-decoration: none; }
+    table.links a:hover { text-decoration: underline; }
+    .anchor-text { color: #234; font-weight: bold; }
+    .anchor-none { color: #aaa; font-style: italic; }
+    .badge {
+      display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px;
+      margin-right: 4px; white-space: nowrap;
+    }
+    .b-ok { background: #e6f5e6; color: #1a7a1a; }
+    .b-missing { background: #fff2d9; color: #8a6100; }
+    .b-broken { background: #fdeaea; color: #c00; }
+    .b-nofollow { background: #eee; color: #666; }
+    .b-count { background: #eef2f7; color: #456; }
+    .hostbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .hostchip {
+      background: #fff; border: 1px solid #ddd; border-radius: 12px;
+      padding: 3px 10px; font-size: 12px; color: #345; cursor: pointer;
+    }
+    .hostchip:hover { border-color: #007bff; color: #007bff; }
+    .hostchip.active { background: #007bff; color: #fff; border-color: #007bff; }
+    .empty { color: #999; padding: 12px; }
+    .note { color: #888; font-size: 12px; margin-top: 8px; }
+
+    /* Re-scan panel */
+    .rescan {
+      background: #fff; border: 1px solid #ddd; border-radius: 8px;
+      padding: 14px; margin-top: 8px;
+    }
+    .rescan label {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 13px; margin-right: 14px; margin-bottom: 8px;
+    }
+    .rescan input[type=number] { width: 90px; padding: 5px; font-size: 13px; }
+    .rescan button {
+      background: #007bff; color: #fff; border: none; border-radius: 5px;
+      padding: 8px 16px; font-size: 14px; cursor: pointer;
+    }
+    .rescan button:hover { opacity: 0.9; }
+    .rescan button:disabled { background: #9bc4ee; cursor: default; }
+    #rescanStatus { margin-top: 10px; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
 
     #lightbox {
       display: none;
@@ -317,37 +366,337 @@
       }
       content.appendChild(histSection);
 
-      // Incoming / outgoing links
-      const cols = el("div", "cols");
-      cols.appendChild(linkList(`Incoming links (${page.incoming.length})`,
-        page.incoming, "No crawl data — incoming links are recorded by spider scans."));
-      cols.appendChild(linkList(`Outgoing links (${page.outgoing.length})`,
-        page.outgoing, "No outgoing links found."));
-      const linkSection = el("section");
-      linkSection.appendChild(cols);
-      content.appendChild(linkSection);
+      // Re-scan this single page (priority job)
+      content.appendChild(renderRescan(page));
+
+      // Link analysis
+      content.appendChild(renderLinks(page.links));
     }
 
-    function linkList(title, urls, emptyText) {
-      const wrap = el("div");
-      wrap.appendChild(el("h2", null, title));
-      const box = el("div", "linkbox");
-      if (urls.length === 0) {
-        box.appendChild(el("span", "empty", emptyText));
-      } else {
-        for (const url of urls.slice(0, 200)) {
-          const a = el("a", null, url);
-          a.href = url;
-          a.target = "_blank";
-          a.rel = "noopener";
-          box.appendChild(a);
+    // --- Re-scan ---------------------------------------------------------
+
+    function renderRescan(page) {
+      const section = el("section");
+      section.appendChild(el("h2", null, "Re-scan this page"));
+
+      const box = el("div", "rescan");
+
+      if (!page.url) {
+        box.appendChild(el("p", "empty",
+          "The original URL could not be read from this saved page, so it cannot be re-scanned."));
+        section.appendChild(box);
+        return section;
+      }
+
+      const rate = el("label", null, "Rate limit (ms) ");
+      const rateInput = el("input");
+      rateInput.type = "number";
+      rateInput.value = "0";
+      rateInput.min = "0";
+      rate.appendChild(rateInput);
+      box.appendChild(rate);
+
+      const shot = el("label", null, "Screenshot");
+      const shotInput = el("input");
+      shotInput.type = "checkbox";
+      shotInput.checked = !!page.screenshotUrl;
+      shot.prepend(shotInput);
+      box.appendChild(shot);
+
+      const imgs = el("label", null, "Download images");
+      const imgsInput = el("input");
+      imgsInput.type = "checkbox";
+      imgs.prepend(imgsInput);
+      box.appendChild(imgs);
+
+      box.appendChild(el("br"));
+
+      const button = el("button", null, "⚡ Re-scan now (priority)");
+      const status = el("div");
+      status.id = "rescanStatus";
+
+      button.onclick = async () => {
+        button.disabled = true;
+        status.textContent = "⏳ Queueing…";
+        try {
+          const response = await fetch(`${API_URL}/scrape`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: page.url,
+              rateLimit: parseInt(rateInput.value, 10) || 0,
+              screenshot: shotInput.checked,
+              downloadImages: imgsInput.checked,
+              priority: true,
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || response.statusText);
+          status.textContent = `⏳ Job ${data.jobId} queued with priority…`;
+          pollRescan(data.statusUrl, status, button);
+        } catch (error) {
+          status.textContent = "❌ " + error.message;
+          button.disabled = false;
         }
-        if (urls.length > 200) {
-          box.appendChild(el("span", "empty", `…and ${urls.length - 200} more`));
+      };
+
+      box.append(button, status);
+      section.appendChild(box);
+      return section;
+    }
+
+    async function pollRescan(statusUrl, status, button) {
+      try {
+        const job = await (await fetch(API_URL + statusUrl)).json();
+
+        if (job.status === "completed") {
+          status.textContent = "✅ Re-scan complete — reloading page data…";
+          setTimeout(() => location.reload(), 900);
+          return;
+        }
+        if (job.status === "failed" || job.status === "cancelled") {
+          status.textContent = job.status === "failed"
+            ? "❌ Re-scan failed: " + job.error
+            : "⏹ Re-scan cancelled.";
+          button.disabled = false;
+          return;
+        }
+
+        status.textContent = `⏳ ${job.status}${job.queuePosition != null ? ` (position ${job.queuePosition + 1} in queue)` : ""}…`;
+        setTimeout(() => pollRescan(statusUrl, status, button), 1000);
+      } catch (error) {
+        status.textContent = "❌ Polling error: " + error.message;
+        button.disabled = false;
+      }
+    }
+
+    // --- Link analysis ---------------------------------------------------
+
+    let linkData = null;
+    let activeTab = "incoming";
+    let hostFilter = null;
+
+    function renderLinks(links) {
+      linkData = links;
+      const section = el("section");
+      section.id = "linksSection";
+
+      const c = links.counts;
+      const h2 = el("h2", null, "Link analysis");
+      section.appendChild(h2);
+
+      // Summary badges
+      const summary = el("p", "note");
+      const parts = [];
+      if (c.brokenOut) parts.push(`${c.brokenOut} broken outgoing`);
+      if (c.notScraped) parts.push(`${c.notScraped} internal target${c.notScraped === 1 ? "" : "s"} not scraped`);
+      if (c.nofollow) parts.push(`${c.nofollow} nofollow`);
+      if (c.externalHosts) parts.push(`${c.externalHosts} external host${c.externalHosts === 1 ? "" : "s"}`);
+      if (c.truncated) parts.push("link list truncated at 500");
+      summary.textContent = parts.join(" · ");
+      if (parts.length) section.appendChild(summary);
+
+      // Tabs
+      const tabs = el("div", "tabs");
+      const tabDefs = [
+        ["incoming", "Incoming", c.incoming],
+        ["internal", "Internal out", c.internal],
+        ["external", "External out", c.external],
+      ];
+      for (const [key, label, count] of tabDefs) {
+        const btn = el("button", "tab" + (activeTab === key ? " active" : ""), label);
+        const n = el("span", "n", String(count));
+        btn.appendChild(n);
+        btn.onclick = () => { activeTab = key; hostFilter = null; redrawLinks(); };
+        tabs.appendChild(btn);
+      }
+      section.appendChild(tabs);
+
+      const body = el("div");
+      body.id = "linksBody";
+      section.appendChild(body);
+
+      setTimeout(redrawLinks, 0);
+      return section;
+    }
+
+    function redrawLinks() {
+      const body = document.getElementById("linksBody");
+      if (!body) return;
+      body.innerHTML = "";
+
+      if (activeTab === "incoming") return renderIncoming(body);
+      if (activeTab === "internal") return renderInternal(body);
+      return renderExternal(body);
+    }
+
+    function filterBox(placeholder, onFilter) {
+      const input = el("input", "linkfilter");
+      input.type = "search";
+      input.placeholder = placeholder;
+      input.oninput = () => onFilter(input.value.trim().toLowerCase());
+      return input;
+    }
+
+    function anchorCell(texts) {
+      const td = el("td");
+      if (!texts || texts.length === 0) {
+        td.appendChild(el("span", "anchor-none", "(no anchor text)"));
+      } else {
+        td.appendChild(el("span", "anchor-text", `“${texts[0]}”`));
+        if (texts.length > 1) {
+          td.append(" ");
+          td.appendChild(el("span", "badge b-count", `+${texts.length - 1} more`));
         }
       }
-      wrap.appendChild(box);
-      return wrap;
+      return td;
+    }
+
+    function urlCell(item) {
+      const td = el("td", "url");
+      if (item.pageUrl) {
+        const a = el("a", null, item.url);
+        a.href = item.pageUrl;
+        a.title = "Open this page's dashboard";
+        td.appendChild(a);
+      } else {
+        td.appendChild(el("span", null, item.url));
+      }
+      td.append(" ");
+      const live = el("a", null, "↗");
+      live.href = item.url;
+      live.target = "_blank";
+      live.rel = "noopener";
+      live.title = "Open the live URL";
+      td.appendChild(live);
+      return td;
+    }
+
+    function renderIncoming(body) {
+      const rows = linkData.incoming;
+      if (rows.length === 0) {
+        body.appendChild(el("p", "empty",
+          "No pages in this scan link here. Incoming links are recorded by spider crawls — a page with none is an orphan."));
+        return;
+      }
+
+      body.appendChild(filterBox(`Filter ${rows.length} linking pages…`, q => draw(q)));
+      const host = el("div");
+      body.appendChild(host);
+
+      function draw(query = "") {
+        host.innerHTML = "";
+        const shown = rows.filter(r =>
+          !query || r.url.toLowerCase().includes(query) ||
+          r.anchorTexts.some(t => t.toLowerCase().includes(query)));
+
+        const table = el("table", "links");
+        const head = el("tr");
+        for (const h of ["Anchor text", "Linking page", "Links", ""]) head.appendChild(el("th", null, h));
+        table.appendChild(head);
+
+        for (const r of shown.slice(0, 300)) {
+          const tr = el("tr");
+          tr.appendChild(anchorCell(r.anchorTexts));
+          tr.appendChild(urlCell(r));
+          const cnt = el("td");
+          if (r.occurrences > 1) cnt.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
+          tr.appendChild(cnt);
+          const flags = el("td");
+          if (r.nofollow) flags.appendChild(el("span", "badge b-nofollow", "nofollow"));
+          if (!r.scraped) flags.appendChild(el("span", "badge b-missing", "source not saved"));
+          tr.appendChild(flags);
+          table.appendChild(tr);
+        }
+        host.appendChild(table);
+        if (shown.length > 300) host.appendChild(el("p", "note", `Showing first 300 of ${shown.length}.`));
+        if (shown.length === 0) host.appendChild(el("p", "empty", "No matches."));
+      }
+      draw();
+    }
+
+    function renderInternal(body) {
+      const rows = linkData.internal;
+      if (rows.length === 0) {
+        body.appendChild(el("p", "empty", "This page links to no other pages on the same site."));
+        return;
+      }
+
+      body.appendChild(filterBox(`Filter ${rows.length} internal links…`, q => draw(q)));
+      const host = el("div");
+      body.appendChild(host);
+
+      function draw(query = "") {
+        host.innerHTML = "";
+        const shown = rows.filter(r =>
+          !query || r.url.toLowerCase().includes(query) || (r.text || "").toLowerCase().includes(query));
+
+        const table = el("table", "links");
+        const head = el("tr");
+        for (const h of ["Anchor text", "Target page", "Status", ""]) head.appendChild(el("th", null, h));
+        table.appendChild(head);
+
+        for (const r of shown.slice(0, 300)) {
+          const tr = el("tr");
+          tr.appendChild(anchorCell(r.text ? [r.text] : []));
+          tr.appendChild(urlCell(r));
+
+          const status = el("td");
+          if (r.broken) status.appendChild(el("span", "badge b-broken", "broken"));
+          else if (r.scraped) status.appendChild(el("span", "badge b-ok", "scraped"));
+          else status.appendChild(el("span", "badge b-missing", "not scraped"));
+          tr.appendChild(status);
+
+          const flags = el("td");
+          if (r.nofollow) flags.appendChild(el("span", "badge b-nofollow", "nofollow"));
+          if (r.occurrences > 1) flags.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
+          tr.appendChild(flags);
+
+          table.appendChild(tr);
+        }
+        host.appendChild(table);
+        if (shown.length > 300) host.appendChild(el("p", "note", `Showing first 300 of ${shown.length}.`));
+        if (shown.length === 0) host.appendChild(el("p", "empty", "No matches."));
+      }
+      draw();
+    }
+
+    function renderExternal(body) {
+      const rows = linkData.external;
+      if (rows.length === 0) {
+        body.appendChild(el("p", "empty", "This page links to no external sites."));
+        return;
+      }
+
+      // Host chips act as filters — "which third parties does this page link to".
+      const bar = el("div", "hostbar");
+      for (const h of linkData.externalHosts) {
+        const chip = el("button", "hostchip" + (hostFilter === h.host ? " active" : ""), `${h.host} (${h.count})`);
+        chip.onclick = () => { hostFilter = hostFilter === h.host ? null : h.host; redrawLinks(); };
+        bar.appendChild(chip);
+      }
+      body.appendChild(bar);
+
+      const shown = hostFilter ? rows.filter(r => r.host === hostFilter) : rows;
+
+      const table = el("table", "links");
+      const head = el("tr");
+      for (const h of ["Anchor text", "External URL", "Host", ""]) head.appendChild(el("th", null, h));
+      table.appendChild(head);
+
+      for (const r of shown.slice(0, 300)) {
+        const tr = el("tr");
+        tr.appendChild(anchorCell(r.text ? [r.text] : []));
+        tr.appendChild(urlCell(r));
+        tr.appendChild(el("td", null, r.host));
+        const flags = el("td");
+        if (r.nofollow) flags.appendChild(el("span", "badge b-nofollow", "nofollow"));
+        if (r.occurrences > 1) flags.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
+        tr.appendChild(flags);
+        table.appendChild(tr);
+      }
+      body.appendChild(table);
+      if (shown.length > 300) body.appendChild(el("p", "note", `Showing first 300 of ${shown.length}.`));
     }
 
     load();
