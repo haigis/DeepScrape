@@ -464,7 +464,11 @@
       const section = el("section");
       section.appendChild(el("h2", null, "Link neighbourhood"));
 
-      const inbound = page.links.incoming.slice(0, 8);
+      // Chrome links (nav/header/footer) repeat on every page and would
+      // make the graph claim every page links to every other page.
+      const contentIn = page.links.incoming.filter(i => (i.region ?? 'content') === 'content');
+      const chromeIn = page.links.incoming.length - contentIn.length;
+      const inbound = contentIn.slice(0, 8);
       const outInternal = page.links.internal.slice(0, 8);
       const outExternal = page.links.external.slice(0, 4);
       const outgoing = [...outInternal, ...outExternal.map(e => ({ ...e, external: true }))];
@@ -491,7 +495,7 @@
 
       root.appendChild(Object.assign(
         svgEl("text", { class: "col-title", x: 0, y: 16 }),
-        { textContent: `Linked from (${page.links.counts.incoming})` }));
+        { textContent: `Linked from in content (${page.links.counts.incomingContent ?? page.links.counts.incoming})` }));
       root.appendChild(Object.assign(
         svgEl("text", { class: "col-title", x: width, y: 16, "text-anchor": "end" }),
         { textContent: `Links out (${page.links.counts.internal + page.links.counts.external})` }));
@@ -966,7 +970,7 @@
 
         const table = el("table", "links");
         const head = el("tr");
-        for (const h of ["Linking page", "Linked as", "URL", "Links", ""]) head.appendChild(el("th", null, h));
+        for (const h of ["Linking page", "Linked as", "URL", "Where", "Links", ""]) head.appendChild(el("th", null, h));
         table.appendChild(head);
 
         for (const r of shown.slice(0, 300)) {
@@ -976,6 +980,11 @@
           tr.appendChild(nameTd);
           tr.appendChild(anchorCell(r.anchorTexts));
           tr.appendChild(urlCell(r));
+          const region = r.region ?? "content";
+          const whereTd = el("td");
+          whereTd.appendChild(el("span", region === "content" ? "badge b-ok" : "badge b-count",
+            region === "content" ? "content" : region));
+          tr.appendChild(whereTd);
           const cnt = el("td");
           if (r.occurrences > 1) cnt.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
           tr.appendChild(cnt);

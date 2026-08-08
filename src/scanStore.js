@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { buildPagePath } from './scraper.js';
+import { classifyLinks, resolveChromeSelectors } from './chrome.js';
 
 /**
  * Read access to scan output on disk: directory trees, per-page details
@@ -45,8 +46,20 @@ export function classifyHref(href) {
  *            nofollow: boolean, ugc: boolean, sponsored: boolean,
  *            tag: 'a'|'area'}[]}
  */
-export function extractAnchors(html, { includeNonHttp = false } = {}) {
+export function extractAnchors(html, { includeNonHttp = false, chromeSelectors = null } = {}) {
     const links = [];
+
+    // Region lookup (nav/header/footer vs content), keyed by href+text so
+    // the cheap regex scan below can be annotated without reparsing.
+    let regionOf = null;
+    if (chromeSelectors) {
+        const classified = classifyLinks(html, chromeSelectors);
+        regionOf = new Map();
+        for (const link of classified.links) {
+            const key = `${link.href} ${link.text}`;
+            if (!regionOf.has(key)) regionOf.set(key, link.region);
+        }
+    }
 
     const push = (attrs, inner, tag) => {
         const href = attrs.match(/href\s*=\s*"([^"]*)"/i)?.[1]
@@ -76,6 +89,7 @@ export function extractAnchors(html, { includeNonHttp = false } = {}) {
             rel,
             kind,
             tag,
+            region: regionOf?.get(`${href.trim()} ${text}`) ?? 'content',
             nofollow: relTokens.includes('nofollow'),
             ugc: relTokens.includes('ugc'),
             sponsored: relTokens.includes('sponsored'),
@@ -173,9 +187,13 @@ export async function getScanToken(scanPath) {
     return `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}`;
 }
 
-export async function getInboundIndex(scanPath) {
+export async function getInboundIndex(scanPath, chromeOverrides = null) {
     const files = await listPageFiles(scanPath);
-    const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}`;
+    // Chrome selectors change what counts as a content link, so they are
+    // part of the cache identity.
+    const chromeSelectors = resolveChromeSelectors(chromeOverrides ?? {});
+    const chromeKey = JSON.stringify(chromeSelectors);
+    const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}:${chromeKey}`;
 
     const cached = inboundCache.get(scanPath);
     if (cached && cached.token === token) return cached.value;
@@ -205,7 +223,7 @@ export async function getInboundIndex(scanPath) {
 
             // Collapse repeats of the same target within one source page.
             const perTarget = new Map();
-            for (const link of extractAnchors(html)) {
+            for (const link of extractAnchors(html, { chromeSelectors })) {
                 const targetRel = urlToScanPath(link.href.split('#')[0]);
                 if (!targetRel || targetRel === file.rel) continue;
 
@@ -216,6 +234,9 @@ export async function getInboundIndex(scanPath) {
                         entry.anchorTexts.push(link.text);
                     }
                     entry.nofollow = entry.nofollow && link.nofollow;
+                    // A page linked from both its nav and its body counts
+                    // as a content link — the editorial one is the signal.
+                    if (link.region === 'content') entry.region = 'content';
                 } else {
                     perTarget.set(targetRel, {
                         path: file.rel,
@@ -223,6 +244,7 @@ export async function getInboundIndex(scanPath) {
                         anchorTexts: link.text ? [link.text] : [],
                         occurrences: 1,
                         nofollow: link.nofollow,
+                        region: link.region ?? 'content',
                         scraped: true,
                     });
                 }
@@ -496,7 +518,7 @@ export async function buildScanTree(scanPath) {
  * @param {string} pagePath - Page path relative to the scan dir (validated).
  * @returns {Promise<object|null>} - null when the page does not exist.
  */
-export async function getPageDetails(scanPath, scan, pagePath) {
+export async function getPageDetails(scanPath, scan, pagePath, chromeOverrides = null) {
     const absPage = path.join(scanPath, pagePath);
 
     let stat;
@@ -520,9 +542,10 @@ export async function getPageDetails(scanPath, scan, pagePath) {
         brokenSet = new Set(raw.split('\n').map(l => stripTrailingSlash(l.trim())).filter(Boolean));
     } catch { /* no crawl artifacts */ }
 
-    const { pageMeta } = await getInboundIndex(scanPath);
-    const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url, pageMeta);
-    const incomingDetailed = await analyzeIncoming(scanPath, scan, pagePath, url);
+    const chromeSelectors = resolveChromeSelectors(chromeOverrides ?? {});
+    const { pageMeta } = await getInboundIndex(scanPath, chromeOverrides);
+    const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url, pageMeta, chromeSelectors);
+    const incomingDetailed = await analyzeIncoming(scanPath, scan, pagePath, url, chromeOverrides);
 
     let meta = null;
     try {
@@ -553,6 +576,9 @@ export async function getPageDetails(scanPath, scan, pagePath) {
             other: links.other,
             counts: {
                 incoming: incomingDetailed.length,
+                // Chrome links repeat sitewide; content links are the signal.
+                incomingContent: incomingDetailed.filter(i => (i.region ?? 'content') === 'content').length,
+                incomingChrome: incomingDetailed.filter(i => (i.region ?? 'content') !== 'content').length,
                 internal: links.internal.length,
                 external: links.external.length,
                 externalHosts: links.externalHosts.length,
@@ -572,10 +598,10 @@ export async function getPageDetails(scanPath, scan, pagePath) {
  * internal targets to their place in the scan (scraped? broken?) and
  * grouping external links by host.
  */
-async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl, pageMeta = new Map()) {
+async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, selfUrl, pageMeta = new Map(), chromeSelectors = null) {
     let anchors;
     try {
-        anchors = extractAnchors(await fs.readFile(absPage, 'utf8'), { includeNonHttp: true });
+        anchors = extractAnchors(await fs.readFile(absPage, 'utf8'), { includeNonHttp: true, chromeSelectors });
     } catch {
         return { internal: [], external: [], externalHosts: [], other: [], truncated: false };
     }
@@ -605,6 +631,7 @@ async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, sel
                 url: clean,
                 text: anchor.text,
                 nofollow: anchor.nofollow,
+                region: anchor.region ?? 'content',
                 ugc: anchor.ugc,
                 sponsored: anchor.sponsored,
                 occurrences: 1,
@@ -667,8 +694,8 @@ async function analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, sel
  * anchors), unioned with the spider's incoming-links.json so pages the
  * crawl saw but did not save are still reported.
  */
-async function analyzeIncoming(scanPath, scan, pagePath, url) {
-    const { index, truncated } = await getInboundIndex(scanPath);
+async function analyzeIncoming(scanPath, scan, pagePath, url, chromeOverrides = null) {
+    const { index, truncated } = await getInboundIndex(scanPath, chromeOverrides);
     const byPath = new Map();
 
     for (const entry of index.get(pagePath) ?? []) {
@@ -704,8 +731,10 @@ async function analyzeIncoming(scanPath, scan, pagePath, url) {
     }
 
     const results = [...byPath.values()]
-        // Sources that actually name the page (anchor text) first.
-        .sort((a, b) => b.anchorTexts.length - a.anchorTexts.length
+        // Content links first — a link written in a page's body says far
+        // more than the same target appearing in every page's nav.
+        .sort((a, b) => (a.region === 'content' ? 0 : 1) - (b.region === 'content' ? 0 : 1)
+            || b.anchorTexts.length - a.anchorTexts.length
             || b.occurrences - a.occurrences
             || (a.path ?? a.url ?? '').localeCompare(b.path ?? b.url ?? ''));
 

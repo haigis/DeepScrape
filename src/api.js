@@ -347,6 +347,13 @@ function resolvePagePath(scanPath, pagePath) {
  */
 app.get('/scan/page', async (req, res) => {
   const { scan, path: pagePath } = req.query;
+  // Optional site-chrome selectors so a customer can name the containers
+  // their site actually uses: ?navSelector=#globalnav&footerSelector=.l-footer
+  const chromeOverrides = {
+    nav: req.query.navSelector,
+    header: req.query.headerSelector,
+    footer: req.query.footerSelector,
+  };
   if (!scan || typeof scan !== 'string') {
     return res.status(400).json({ error: 'Scan parameter is required' });
   }
@@ -358,7 +365,7 @@ app.get('/scan/page', async (req, res) => {
   if (!rel) return res.status(400).json({ error: 'Invalid page path' });
 
   try {
-    const details = await getPageDetails(scanPath, scan, rel);
+    const details = await getPageDetails(scanPath, scan, rel, chromeOverrides);
     if (!details) return res.status(404).json({ error: 'Page not found in scan' });
 
     // FM-style attributes scored against the rest of the scan.
