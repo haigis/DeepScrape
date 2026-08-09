@@ -44,7 +44,10 @@ const parseBoolean = (value) => {
  */
 const paramsToOptions = (params) => ({
   rateLimit: Number(params.rateLimit) || 1000,
-  maxDepth: Number(params.maxDepth) || 2,
+  // Number(...) || 2 would turn an explicit 0 into 2 — depth 0 is a
+  // legitimate request ("these pages only, follow nothing").
+  maxDepth: Number.isFinite(Number(params.maxDepth)) && params.maxDepth !== null && params.maxDepth !== undefined && params.maxDepth !== ''
+    ? Number(params.maxDepth) : 2,
   // Optional folder scope, e.g. "/help" — only that subtree is crawled.
   pathPrefix: params.pathPrefix || null,
   // Hard page ceiling, enforced by the crawler itself (plan limits).
