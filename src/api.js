@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { processUrls } from './scraper.js';
-import { fetchSitemapUrls } from './sitemap.js';
+import { fetchSitemapUrls, discoverSitemaps } from './sitemap.js';
 import { spiderCrawl } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
@@ -162,6 +162,64 @@ app.post('/scrape/spider', (req, res) => {
     { url, rateLimit, maxDepth, pathPrefix, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal, gate) =>
       spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal, gate }));
+
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
+});
+
+/**
+ * POST /scrape/full
+ * Finds ALL pages on a domain: discovers the site's sitemaps
+ * (robots.txt, then /sitemap.xml), seeds the spider with every sitemap
+ * URL plus the start page, and lets link-following catch anything the
+ * sitemap doesn't list. Orphans (in the sitemap but never linked) and
+ * unlisted pages (linked but not in the sitemap) are both captured.
+ */
+app.post('/scrape/full', (req, res) => {
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, maxPages } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL is required' });
+
+  const job = createJob(
+    'full',
+    { url, rateLimit, maxDepth, pathPrefix, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    async (onProgress, params, signal, gate) => {
+      const origin = new URL(params.url).origin;
+      const host = new URL(params.url).hostname;
+
+      onProgress({ done: 0, total: null, currentUrl: 'discovering sitemaps…' });
+      const sitemaps = await discoverSitemaps(origin);
+
+      let sitemapUrls = [];
+      for (const sitemap of sitemaps) {
+        try {
+          sitemapUrls.push(...await fetchSitemapUrls(sitemap));
+        } catch (err) {
+          console.warn(`⚠️ Sitemap ${sitemap} failed: ${err.message}`);
+        }
+      }
+
+      // Same host only; honour the folder scope if one was given.
+      const prefix = params.pathPrefix
+        ? '/' + String(params.pathPrefix).trim().replace(/^\/+|\/+$/g, '')
+        : null;
+      sitemapUrls = [...new Set(sitemapUrls)].filter(u => {
+        try {
+          const parsed = new URL(u);
+          if (parsed.hostname !== host) return false;
+          if (prefix && parsed.pathname !== prefix && !parsed.pathname.startsWith(prefix + '/')) return false;
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+      console.log(`🌐 Full discovery: ${sitemaps.length} sitemap(s), ${sitemapUrls.length} URLs seeded + spider from ${params.url}`);
+
+      const summary = await spiderCrawl(
+        [params.url, ...sitemapUrls],
+        { ...paramsToOptions(params), onProgress, signal, gate },
+      );
+      return { ...summary, sitemaps, sitemapSeeded: sitemapUrls.length };
+    });
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });

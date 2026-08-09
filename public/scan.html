@@ -130,6 +130,7 @@
         <option value="scrape">Single URL</option>
         <option value="sitemap">Sitemap Scrape</option>
         <option value="spider">Spider Crawl</option>
+        <option value="full">Full Discovery (sitemap + spider — all pages)</option>
         <option value="batch">Batch (URL list)</option>
       </select>
     </div>
@@ -212,7 +213,7 @@
 
     function updateForm() {
       document.getElementById("spiderField").style.display = 
-        document.getElementById("mode").value === "spider" ? "block" : "none";
+        ["spider", "full"].includes(document.getElementById("mode").value) ? "block" : "none";
     }
 
     async function sendRequest() {
@@ -250,8 +251,9 @@
           endpoint = "/scrape/sitemap";
           requestBody.sitemapUrl = inputUrl;
           break;
+        case "full":
         case "spider":
-          endpoint = "/scrape/spider";
+          endpoint = mode === "full" ? "/scrape/full" : "/scrape/spider";
           requestBody.url = inputUrl;
           requestBody.maxDepth = maxDepth;
           // Optional folder scope: only this subtree is crawled.

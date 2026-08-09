@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import crypto from 'crypto';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import axios from 'axios';
@@ -174,6 +175,21 @@ export async function scrapePage(browser, url, outDir, options = {}) {
 
         let html = await page.content();
         html = fixRelativePaths(html, url);
+
+        // Content dedupe: when the caller shares a hash registry (the
+        // spider does), a page whose rendered HTML is byte-identical to
+        // one already saved is recorded as a duplicate, not saved again —
+        // different URLs serving the same document are one page.
+        if (options.dedupe) {
+            const hash = crypto.createHash('sha1').update(html).digest('hex');
+            const original = options.dedupe.get(hash);
+            if (original && original !== url) {
+                console.log(`♻️ Duplicate content: ${url} = ${original} — skipping save.`);
+                // links stay empty: the original's links were already followed.
+                return { ok: true, status, links: [], duplicateOf: original };
+            }
+            options.dedupe.set(hash, url);
+        }
 
         const savePath = path.join(outDir, buildPagePath(url));
         await fs.mkdir(path.dirname(savePath), { recursive: true });

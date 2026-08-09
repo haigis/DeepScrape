@@ -9,7 +9,7 @@ import { classifyLinks, resolveChromeSelectors } from './chrome.js';
  * validated to sit inside the output root (api.js does the validation).
  */
 
-const ARTIFACT_NAMES = new Set(['all-links.txt', 'broken-links.txt', 'incoming-links.json']);
+const ARTIFACT_NAMES = new Set(['all-links.txt', 'broken-links.txt', 'incoming-links.json', 'duplicate-pages.json']);
 
 /** Folders holding downloaded assets rather than saved pages. */
 const ASSET_FOLDERS = new Set(['images', '_assets']);

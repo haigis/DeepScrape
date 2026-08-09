@@ -16,13 +16,28 @@ const isImageUrl = (url) => {
 };
 
 /**
- * Strips URL fragments so /page and /page#section dedupe to one entry.
- * @param {string} url
- * @returns {string}
+ * Query parameters that never change the page served — analytics and
+ * click-tracking noise. Kept conservative: anything not listed here is
+ * assumed to be meaningful (?page=2, ?q=…).
  */
-const normalizeUrl = (url) => {
+const TRACKING_PARAMS = /^(utm_\w+|gclid|gclsrc|dclid|fbclid|msclkid|mc_[ce]id|igshid|_hs\w+|vero_\w+|yclid|s_kwcid)$/i;
+
+export const normalizeUrl = (url) => {
     const u = new URL(url);
     u.hash = '';
+
+    // Drop tracking params; sort the rest so ?a=1&b=2 and ?b=2&a=1 match.
+    const kept = [...u.searchParams.entries()]
+        .filter(([key]) => !TRACKING_PARAMS.test(key))
+        .sort(([a], [b]) => a.localeCompare(b));
+    u.search = '';
+    for (const [key, value] of kept) u.searchParams.append(key, value);
+
+    // Trailing-slash twins (/page vs /page/) are one page; keep the root "/".
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) {
+        u.pathname = u.pathname.replace(/\/+$/, '');
+    }
+
     return u.href;
 };
 
@@ -87,6 +102,10 @@ export async function spiderCrawl(startUrls, options = {}) {
     const visited = new Set();
     const queued = new Set();
     const queue = [];
+    /** sha1(html) -> first URL — shared with scrapePage for content dedupe. */
+    const contentHashes = new Map();
+    /** url -> the already-saved URL it duplicates. */
+    const duplicates = new Map();
 
     for (const url of startUrls) {
         const normalized = normalizeUrl(url);
@@ -131,7 +150,7 @@ export async function spiderCrawl(startUrls, options = {}) {
         console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
         onProgress?.({ done: visited.size, total: visited.size + queue.length, currentUrl: url });
 
-        const result = await scrapePage(browser, url, outDir, opts);
+        const result = await scrapePage(browser, url, outDir, { ...opts, dedupe: contentHashes });
 
         if (!result.ok) {
             // Navigation error or HTTP >= 400 — record and move on.
@@ -141,6 +160,10 @@ export async function spiderCrawl(startUrls, options = {}) {
                 brokenLinks.add(url);
             }
             continue;
+        }
+
+        if (result.duplicateOf) {
+            duplicates.set(url, result.duplicateOf);
         }
 
         for (const rawLink of result.links) {
@@ -177,10 +200,19 @@ export async function spiderCrawl(startUrls, options = {}) {
     await fs.writeFile(path.join(outDir, 'all-links.txt'), [...linksList].join('\n'), 'utf8');
     await fs.writeFile(path.join(outDir, 'broken-links.txt'), [...brokenLinks].join('\n'), 'utf8');
     await fs.writeFile(path.join(outDir, 'incoming-links.json'), JSON.stringify(incomingAsObject, null, 2), 'utf8');
+    // URL -> canonical URL it duplicated; duplicate-content evidence for
+    // the consistency engine, and proof of what was skipped and why.
+    await fs.writeFile(
+        path.join(outDir, 'duplicate-pages.json'),
+        JSON.stringify(Object.fromEntries(duplicates), null, 2),
+        'utf8',
+    );
 
     console.log(`📁 Saved crawl results to: ${outDir}`);
     return {
         visited: visited.size,
+        saved: visited.size - duplicates.size - brokenLinks.size,
+        duplicates: duplicates.size,
         broken: brokenLinks.size,
         outDir,
         aborted: signal?.aborted ?? false,
