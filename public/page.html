@@ -964,13 +964,53 @@
 
       function draw(query = "") {
         host.innerHTML = "";
-        const shown = rows.filter(r =>
+        const matching = rows.filter(r =>
           !query || r.url.toLowerCase().includes(query) ||
           r.anchorTexts.some(t => t.toLowerCase().includes(query)));
 
+        // Clearly separated groups: links written in page content first,
+        // then links that repeat sitewide from navigation/footers —
+        // grouped under the region names (including custom selector
+        // groups like "Barclays header").
+        const content = matching.filter(r => (r.region ?? "content") === "content");
+        const chrome = matching.filter(r => (r.region ?? "content") !== "content");
+
+        drawGroup(host, `Content links (${content.length})`,
+          "Written into a page's body — the links that say something about this page.", content);
+
+        if (chrome.length) {
+          const byRegion = new Map();
+          for (const r of chrome) {
+            const key = r.region;
+            if (!byRegion.has(key)) byRegion.set(key, []);
+            byRegion.get(key).push(r);
+          }
+          for (const [region, list] of byRegion) {
+            drawGroup(host, `${region} links (${list.length})`,
+              "Repeated sitewide from navigation, headers or footers — reach, not endorsement.", list, true);
+          }
+        }
+        if (matching.length === 0) host.appendChild(el("p", "empty", "No matches."));
+      }
+
+      function drawGroup(host, title, subtitle, shown, collapsed = false) {
+        if (shown.length === 0 && collapsed) return;
+        const details = el("details");
+        if (!collapsed) details.open = true;
+        const summary = el("summary");
+        summary.style.cssText = "cursor:pointer;font-weight:bold;margin:10px 0 6px;";
+        summary.textContent = title;
+        details.appendChild(summary);
+        details.appendChild(el("p", "note", subtitle));
+        if (shown.length === 0) {
+          details.appendChild(el("p", "empty", "None."));
+          host.appendChild(details);
+          return;
+        }
+
         const table = el("table", "links");
         const head = el("tr");
-        for (const h of ["Linking page", "Linked as", "URL", "Where", "Links", ""]) head.appendChild(el("th", null, h));
+        for (const h of ["Linking page", "Linked as", "URL", "Links", ""]) head.appendChild(el("th", null, h));
         table.appendChild(head);
 
         for (const r of shown.slice(0, 300)) {
@@ -980,11 +1020,6 @@
           tr.appendChild(nameTd);
           tr.appendChild(anchorCell(r.anchorTexts));
           tr.appendChild(urlCell(r));
-          const region = r.region ?? "content";
-          const whereTd = el("td");
-          whereTd.appendChild(el("span", region === "content" ? "badge b-ok" : "badge b-count",
-            region === "content" ? "content" : region));
-          tr.appendChild(whereTd);
           const cnt = el("td");
           if (r.occurrences > 1) cnt.appendChild(el("span", "badge b-count", `${r.occurrences}×`));
           tr.appendChild(cnt);
@@ -997,9 +1032,9 @@
           tr.appendChild(flags);
           table.appendChild(tr);
         }
-        host.appendChild(table);
-        if (shown.length > 300) host.appendChild(el("p", "note", `Showing first 300 of ${shown.length}.`));
-        if (shown.length === 0) host.appendChild(el("p", "empty", "No matches."));
+        details.appendChild(table);
+        if (shown.length > 300) details.appendChild(el("p", "note", `Showing first 300 of ${shown.length}.`));
+        host.appendChild(details);
       }
       draw();
     }
