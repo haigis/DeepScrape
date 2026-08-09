@@ -64,6 +64,39 @@ export function resolveChromeSelectors(overrides = {}, replace = false) {
 }
 
 /**
+ * Named selector groups: the general form of chrome configuration.
+ *
+ * A customer names the containers their site actually uses —
+ *   [{ name: "Mega menu", selector: ".c-header__content", enabled: true }]
+ * — and links inside them are reported under that name instead of
+ * "content". The built-in nav/header/footer detection stays on unless
+ * `includeDefaults` is false.
+ *
+ * @param {{name: string, selector: string, enabled?: boolean}[]} [groups]
+ * @param {{includeDefaults?: boolean}} [opts]
+ * @returns {{name: string, selectors: string[]}[]} enabled groups only,
+ *          custom groups first so they win over the generic defaults.
+ */
+export function resolveChromeGroups(groups = [], { includeDefaults = true } = {}) {
+    const custom = (Array.isArray(groups) ? groups : [])
+        .filter(g => g && g.enabled !== false && g.selector && String(g.name ?? '').trim())
+        .map(g => ({
+            name: String(g.name).trim().slice(0, 40),
+            selectors: String(g.selector).split(',').map(s => s.trim()).filter(Boolean),
+        }))
+        .filter(g => g.selectors.length > 0);
+
+    const defaults = includeDefaults
+        ? ['nav', 'footer', 'header'].map(region => ({
+            name: region,
+            selectors: [...DEFAULT_CHROME_SELECTORS[region]],
+        }))
+        : [];
+
+    return [...custom, ...defaults];
+}
+
+/**
  * Parses a page and returns a lookup that classifies each anchor.
  *
  * Cheerio gives real CSS selector support, so a customer can name the
@@ -80,15 +113,22 @@ export function classifyLinks(html, selectors = resolveChromeSelectors()) {
     try {
         $ = cheerio.load(html);
     } catch {
-        return { links: [], chromeFound: { nav: false, header: false, footer: false } };
+        return { links: [], chromeFound: {} };
     }
 
-    const chromeFound = { nav: false, header: false, footer: false };
+    // Accept either the legacy {nav, header, footer} trio or the general
+    // named-group list from resolveChromeGroups().
+    const groups = Array.isArray(selectors)
+        ? selectors
+        : REGION_ORDER.map(region => ({ name: region, selectors: selectors[region] ?? [] }));
 
-    // Tag every element inside a chrome region. Innermost wins, so a nav
-    // inside a footer is reported as nav.
-    for (const region of REGION_ORDER) {
-        for (const selector of selectors[region]) {
+    const chromeFound = {};
+
+    // Tag every element inside a chrome region. Earlier groups win, so
+    // custom groups (listed first) beat the generic defaults.
+    for (const { name: region, selectors: groupSelectors } of groups) {
+        chromeFound[region] ??= false;
+        for (const selector of groupSelectors) {
             let matched;
             try {
                 matched = $(selector);

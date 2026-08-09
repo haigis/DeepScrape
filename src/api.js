@@ -407,11 +407,21 @@ app.get('/scan/page', async (req, res) => {
   const { scan, path: pagePath } = req.query;
   // Optional site-chrome selectors so a customer can name the containers
   // their site actually uses: ?navSelector=#globalnav&footerSelector=.l-footer
-  const chromeOverrides = {
+  // Named groups: ?chrome=[{"name":"Mega menu","selector":".c-header__content","enabled":true}]
+  // Legacy per-region params still accepted.
+  let chromeOverrides = {
     nav: req.query.navSelector,
     header: req.query.headerSelector,
     footer: req.query.footerSelector,
   };
+  if (req.query.chrome) {
+    try {
+      const parsed = JSON.parse(req.query.chrome);
+      if (Array.isArray(parsed)) chromeOverrides = parsed;
+    } catch {
+      return res.status(400).json({ error: 'chrome must be a JSON array of {name, selector, enabled}' });
+    }
+  }
   if (!scan || typeof scan !== 'string') {
     return res.status(400).json({ error: 'Scan parameter is required' });
   }

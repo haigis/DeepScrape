@@ -23,7 +23,7 @@ import { rateFindings } from './rating.js';
  * @property {number} pagesAffected
  */
 
-const MAX_PAGES = 3000;
+const MAX_PAGES = Number(process.env.DS_MAX_ANALYZED_PAGES) || 100000;
 const MAX_EVIDENCE = 12;
 
 /** scanPath -> { token, report } */

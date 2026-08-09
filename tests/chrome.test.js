@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyLinks, resolveChromeSelectors, DEFAULT_CHROME_SELECTORS } from '../src/chrome.js';
+import { classifyLinks, resolveChromeSelectors, resolveChromeGroups, DEFAULT_CHROME_SELECTORS } from '../src/chrome.js';
 
 const page = (body) => `<html><body>${body}</body></html>`;
 
@@ -87,5 +87,53 @@ describe('classifyLinks', () => {
     it('keeps anchor text and rel alongside the region', () => {
         const [link] = classifyLinks(page('<nav><a href="/a" rel="NOFOLLOW">Go <span>here</span></a></nav>')).links;
         expect(link).toMatchObject({ href: '/a', text: 'Go here', rel: 'nofollow', region: 'nav' });
+    });
+});
+
+describe('named selector groups', () => {
+    it('reports links under the custom group name', () => {
+        const groups = resolveChromeGroups([
+            { name: 'Mega menu', selector: '.c-header__content', enabled: true },
+        ]);
+        const { links } = classifyLinks(
+            page('<div class="c-header__content"><a href="/m">m</a></div><main><a href="/c">c</a></main>'),
+            groups,
+        );
+        const byHref = Object.fromEntries(links.map(l => [l.href, l.region]));
+        expect(byHref['/m']).toBe('Mega menu');
+        expect(byHref['/c']).toBe('content');
+    });
+
+    it('disabled groups are ignored', () => {
+        const groups = resolveChromeGroups([
+            { name: 'Mega menu', selector: '.c-header__content', enabled: false },
+        ]);
+        const { links } = classifyLinks(page('<div class="c-header__content"><a href="/m">m</a></div>'), groups);
+        expect(links[0].region).toBe('content');
+    });
+
+    it('custom groups win over the built-in defaults', () => {
+        const groups = resolveChromeGroups([{ name: 'Site chrome', selector: 'nav', enabled: true }]);
+        const { links } = classifyLinks(page('<nav><a href="/n">n</a></nav>'), groups);
+        expect(links[0].region).toBe('Site chrome');
+    });
+
+    it('defaults can be turned off entirely', () => {
+        const groups = resolveChromeGroups([], { includeDefaults: false });
+        const { links } = classifyLinks(page('<nav><a href="/n">n</a></nav>'), groups);
+        expect(links[0].region).toBe('content');
+    });
+
+    it('supports several selectors in one group and several groups', () => {
+        const groups = resolveChromeGroups([
+            { name: 'Header', selector: '.c-header__content, .c-header__util' },
+            { name: 'Legal', selector: '.c-legal' },
+        ]);
+        const { links } = classifyLinks(page(
+            '<div class="c-header__util"><a href="/u">u</a></div>'
+            + '<div class="c-legal"><a href="/l">l</a></div>'), groups);
+        const byHref = Object.fromEntries(links.map(l => [l.href, l.region]));
+        expect(byHref['/u']).toBe('Header');
+        expect(byHref['/l']).toBe('Legal');
     });
 });

@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { buildPagePath } from './scraper.js';
-import { classifyLinks, resolveChromeSelectors } from './chrome.js';
+import { classifyLinks, resolveChromeSelectors, resolveChromeGroups } from './chrome.js';
 
 /**
  * Read access to scan output on disk: directory trees, per-page details
@@ -123,7 +123,7 @@ export function urlToScanPath(url) {
 const stripTrailingSlash = (url) => url.replace(/\/+$/, '');
 
 /** Safety caps for the whole-scan inbound index. */
-const MAX_INDEXED_PAGES = 5000;
+const MAX_INDEXED_PAGES = Number(process.env.DS_MAX_ANALYZED_PAGES) || 100000;
 
 /** scanPath -> { token, index } — rebuilt when files change. */
 const inboundCache = new Map();
@@ -191,7 +191,9 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
     const files = await listPageFiles(scanPath);
     // Chrome selectors change what counts as a content link, so they are
     // part of the cache identity.
-    const chromeSelectors = resolveChromeSelectors(chromeOverrides ?? {});
+    const chromeSelectors = Array.isArray(chromeOverrides)
+        ? resolveChromeGroups(chromeOverrides)
+        : resolveChromeSelectors(chromeOverrides ?? {});
     const chromeKey = JSON.stringify(chromeSelectors);
     const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}:${chromeKey}`;
 
@@ -542,7 +544,9 @@ export async function getPageDetails(scanPath, scan, pagePath, chromeOverrides =
         brokenSet = new Set(raw.split('\n').map(l => stripTrailingSlash(l.trim())).filter(Boolean));
     } catch { /* no crawl artifacts */ }
 
-    const chromeSelectors = resolveChromeSelectors(chromeOverrides ?? {});
+    const chromeSelectors = Array.isArray(chromeOverrides)
+        ? resolveChromeGroups(chromeOverrides)
+        : resolveChromeSelectors(chromeOverrides ?? {});
     const { pageMeta } = await getInboundIndex(scanPath, chromeOverrides);
     const links = await analyzeOutgoing(absPage, scanPath, scan, selfHost, brokenSet, url, pageMeta, chromeSelectors);
     const incomingDetailed = await analyzeIncoming(scanPath, scan, pagePath, url, chromeOverrides);
