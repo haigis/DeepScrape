@@ -14,6 +14,10 @@ import { generateOutputDir } from './fileHandler.js';
  * @param {{pathPrefix?: string, includePaths?: string[], excludePaths?: string[]}} options
  * @returns {(url: string) => boolean}
  */
+/** Crawl workers: request → env → default 4, clamped to 1-16. */
+export const crawlConcurrency = (options = {}) => Math.max(1, Math.min(16,
+    Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 4));
+
 export function makeScope(options = {}) {
     const normalise = (p) => '/' + String(p).trim().replace(/^\/+|\/+$/g, '');
     const includes = [options.pathPrefix, ...(options.includePaths ?? [])]
@@ -127,7 +131,7 @@ export async function spiderCrawl(startUrls, options = {}) {
 
     console.log(`🕷️ Starting spider crawl on: ${startUrls[0]} (maxDepth: ${maxDepth}`
         + `${pathPrefix ? `, scoped to ${pathPrefix}` : ''}`
-        + `, workers: ${Math.max(1, Math.min(8, Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 3))})`);
+        + `, workers: ${crawlConcurrency(options)})`);
 
     const visited = new Set();
     const queued = new Set();
@@ -177,8 +181,7 @@ export async function spiderCrawl(startUrls, options = {}) {
      * page cap can overshoot by at most workers−1 pages. Rate limit is
      * per worker — the polite delay a real visitor produces per tab.
      */
-    const concurrency = Math.max(1, Math.min(8,
-        Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 3));
+    const concurrency = crawlConcurrency(options);
     let inFlight = 0;
 
     async function worker() {

@@ -157,6 +157,9 @@
 
       <label for="pathPrefix">Folder / path prefix (Spider Mode Only):</label>
       <input type="text" id="pathPrefix" placeholder="e.g. /help — blank scans the whole site">
+
+      <label for="workers">Parallel workers (1-16):</label>
+      <input type="number" id="workers" value="4" min="1" max="16">
     </div>
 
     <div class="form-group switch-container">
@@ -280,6 +283,8 @@
           if (pathPrefix) requestBody.pathPrefix = pathPrefix;
           // Crawler modes exclude by path prefix, not substring.
           if (excludeUrls.length) requestBody.excludePaths = excludeUrls;
+          const workers = parseInt(document.getElementById("workers").value, 10);
+          if (workers > 0) requestBody.concurrency = workers;
           break;
         case "batch":
           endpoint = "/scrape/batch";
@@ -336,6 +341,7 @@
       const bits = [`rate ${p.rateLimit}ms`];
       if (job.type === "spider") bits.push(`depth ${p.maxDepth}`);
       if (p.pathPrefix) bits.push(`scope ${p.pathPrefix}`);
+      if (p.concurrency) bits.push(`×${p.concurrency} workers`);
       if (p.screenshot) bits.push("📸");
       if (p.downloadImages) bits.push("🖼");
       return bits.join(" · ");
