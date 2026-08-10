@@ -10,6 +10,7 @@ import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jo
 import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './scanStore.js';
 import { getConsistencyReport } from './consistency.js';
 import { buildDashboard, buildPageAttributes } from './analytics.js';
+import { extractScanQa } from './qa.js';
 
 const app = express();
 
@@ -576,6 +577,39 @@ app.get('/scan/history', async (req, res) => {
   try {
     const history = await getPageHistory(domainRoot, domain, cleanRel);
     res.json({ domain, path: cleanRel, history });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /scan/qa?scan=<domain>/<date>&paths=<json>&selectors=<json>
+ * Q&A pairs from the named source paths (FAQ group pages) plus
+ * heading-scoped chunks for the whole scan. Deterministic extraction —
+ * see src/qa.js.
+ */
+app.get('/scan/qa', async (req, res) => {
+  const scan = req.query.scan;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  let qaPaths = [];
+  let selectors = [];
+  try {
+    if (req.query.paths) qaPaths = JSON.parse(req.query.paths);
+    if (req.query.selectors) selectors = JSON.parse(req.query.selectors);
+    if (!Array.isArray(qaPaths) || !Array.isArray(selectors)) throw new Error('not arrays');
+  } catch {
+    return res.status(400).json({ error: 'paths and selectors must be JSON arrays' });
+  }
+
+  try {
+    const result = await extractScanQa(scanPath, { qaPaths, selectors });
+    res.json({ scan, ...result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
