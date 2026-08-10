@@ -260,6 +260,8 @@
           // Optional folder scope: only this subtree is crawled.
           const pathPrefix = document.getElementById("pathPrefix").value.trim();
           if (pathPrefix) requestBody.pathPrefix = pathPrefix;
+          // Crawler modes exclude by path prefix, not substring.
+          if (excludeUrls.length) requestBody.excludePaths = excludeUrls;
           break;
         case "batch":
           endpoint = "/scrape/batch";
