@@ -92,8 +92,23 @@ export async function spiderCrawl(startUrls, options = {}) {
     const { rateLimit, maxDepth } = opts;
     const { onProgress, signal, gate } = options;
 
-    const inScope = makeScope(options);
+    const baseScope = makeScope(options);
     const pathPrefix = options.pathPrefix ?? null; // logging only
+
+    /**
+     * Live inspection channel (options.live, owned by the API): the
+     * spider publishes its URL state through live.getState, and honours
+     * excludes pushed into live.dynamicExcludes *mid-crawl* — checked
+     * both when queueing new links and when dequeuing already-queued
+     * ones, so an exclude takes effect immediately.
+     */
+    const live = options.live ?? null;
+    const dynamicallyExcluded = (url) => {
+        const excludes = live?.dynamicExcludes;
+        if (!excludes || excludes.length === 0) return false;
+        return !makeScope({ excludePaths: excludes })(url);
+    };
+    const inScope = (url) => baseScope(url) && !dynamicallyExcluded(url);
 
     if (!startUrls || startUrls.length === 0) {
         console.error('❌ Error: spiderCrawl received an empty startUrls array.');
@@ -133,6 +148,16 @@ export async function spiderCrawl(startUrls, options = {}) {
     const brokenLinks = new Set();
     /** Map of URL -> Set of pages that link to it. */
     const incomingLinks = new Map();
+    /** URLs dropped mid-crawl by a live exclude. */
+    const excludedLive = [];
+
+    if (live) {
+        live.getState = () => ({
+            visited: [...visited],
+            queued: queue.map(entry => entry.url),
+            excluded: [...excludedLive],
+        });
+    }
 
     const browser = await getBrowser();
 
@@ -159,6 +184,11 @@ export async function spiderCrawl(startUrls, options = {}) {
         }
         const { url, depth } = queue.shift();
         if (visited.has(url) || isImageUrl(url)) continue;
+        // A live exclude may have arrived after this URL was queued.
+        if (dynamicallyExcluded(url)) {
+            excludedLive.push(url);
+            continue;
+        }
 
         visited.add(url);
         console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);

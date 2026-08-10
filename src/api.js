@@ -159,15 +159,30 @@ app.post('/scrape/sitemap', (req, res) => {
  * POST /scrape/spider
  * Performs a spider crawl.
  */
+/**
+ * Live crawl inspectors, keyed by job id. The spider publishes its URL
+ * state through these and honours excludes pushed in mid-crawl. Kept
+ * after completion so the full URL list stays inspectable; pruned FIFO.
+ */
+const liveCrawls = new Map();
+const registerLiveCrawl = (jobId, live) => {
+  liveCrawls.set(jobId, live);
+  while (liveCrawls.size > 100) {
+    liveCrawls.delete(liveCrawls.keys().next().value);
+  }
+};
+
 app.post('/scrape/spider', (req, res) => {
   const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
+  const live = { dynamicExcludes: [] };
   const job = createJob(
     'spider',
     { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal, gate) =>
-      spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal, gate }));
+      spiderCrawl([params.url], { ...paramsToOptions(params), live, onProgress, signal, gate }));
+  registerLiveCrawl(job.id, live);
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
@@ -184,6 +199,7 @@ app.post('/scrape/full', (req, res) => {
   const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
+  const live = { dynamicExcludes: [] };
   const job = createJob(
     'full',
     { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
@@ -217,10 +233,11 @@ app.post('/scrape/full', (req, res) => {
 
       const summary = await spiderCrawl(
         [params.url, ...sitemapUrls],
-        { ...paramsToOptions(params), onProgress, signal, gate },
+        { ...paramsToOptions(params), live, onProgress, signal, gate },
       );
       return { ...summary, sitemaps, sitemapSeeded: sitemapUrls.length };
     });
+  registerLiveCrawl(job.id, live);
 
   res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
 });
@@ -271,6 +288,68 @@ app.get('/jobs/:id', (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job);
+});
+
+/**
+ * GET /jobs/:id/urls
+ * Live URL state of a spider/full crawl: pages visited so far, the
+ * queue still to fetch, URLs dropped by live excludes, and the current
+ * exclude list. Works during the crawl and after it finishes.
+ */
+app.get('/jobs/:id/urls', (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const live = liveCrawls.get(req.params.id);
+  if (!live) return res.status(404).json({ error: 'No URL inspection for this job type' });
+
+  const state = live.getState?.() ?? { visited: [], queued: [], excluded: [] };
+  const CAP = 2000;
+  res.json({
+    jobId: job.id,
+    status: job.status,
+    counts: {
+      visited: state.visited.length,
+      queued: state.queued.length,
+      excluded: state.excluded.length,
+    },
+    visited: state.visited.slice(-CAP),
+    queued: state.queued.slice(0, CAP),
+    excluded: state.excluded.slice(-CAP),
+    dynamicExcludes: [...live.dynamicExcludes],
+  });
+});
+
+/**
+ * POST /jobs/:id/exclude { path, remove? }
+ * Adds (or removes) a live exclude — a folder ("/branch-finder") or
+ * exact page — while the crawl runs. Queued URLs under an excluded
+ * path are dropped at dequeue time; nothing already saved is deleted.
+ */
+app.post('/jobs/:id/exclude', (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const live = liveCrawls.get(req.params.id);
+  if (!live) return res.status(404).json({ error: 'This job type has no live excludes' });
+
+  const raw = req.body?.path;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return res.status(400).json({ error: 'path is required' });
+  }
+  const normalised = '/' + raw.trim().replace(/^\/+|\/+$/g, '');
+  if (!/^\/[\w\-./%]{0,300}$/.test(normalised)) {
+    return res.status(400).json({ error: 'path must be a simple path like /help or /pricing.html' });
+  }
+
+  if (req.body?.remove) {
+    const idx = live.dynamicExcludes.indexOf(normalised);
+    if (idx !== -1) live.dynamicExcludes.splice(idx, 1);
+  } else if (!live.dynamicExcludes.includes(normalised)) {
+    live.dynamicExcludes.push(normalised);
+  }
+
+  res.json({ success: true, dynamicExcludes: [...live.dynamicExcludes] });
 });
 
 /**

@@ -206,6 +206,24 @@
     .edit-row label { display: inline-flex; align-items: center; gap: 4px; font-weight: normal; margin-right: 12px; font-size: 13px; }
     .edit-row input[type=number] { width: 90px; padding: 4px; font-size: 13px; }
     .edit-row input[type=checkbox] { width: auto; }
+    .urls-row td { background: #fbfcfe; }
+    .urls-cols { display: flex; gap: 16px; flex-wrap: wrap; }
+    .urls-col { flex: 1 1 260px; min-width: 240px; }
+    .urls-col h4 { margin: 0 0 6px; font-size: 13px; }
+    .url-list { max-height: 260px; overflow-y: auto; border: 1px solid #e3e9f0; border-radius: 4px; background: #fff; }
+    .url-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-bottom: 1px solid #f2f5f8; font-size: 12px; }
+    .url-row:last-child { border-bottom: 0; }
+    .url-row code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+    .url-row.dropped code { color: #999; text-decoration: line-through; }
+    .xbtn { padding: 1px 6px; font-size: 11px; width: auto; background: #fff; color: #d60000;
+            border: 1px solid #f0cfcf; border-radius: 3px; cursor: pointer; }
+    .xbtn:hover { background: #fdeeee; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .chip { display: inline-flex; align-items: center; gap: 4px; background: #fdeeee; color: #a00;
+            border: 1px solid #f0cfcf; border-radius: 999px; padding: 1px 8px; font-size: 12px; }
+    .chip button { background: none; border: 0; color: inherit; cursor: pointer; padding: 0; width: auto; font-size: 13px; }
+    .urls-form { display: flex; gap: 6px; margin-top: 8px; }
+    .urls-form input { flex: 1; padding: 4px 6px; font-size: 12px; }
   </style>
 
   <script>
@@ -297,6 +315,9 @@
 
     /** Job id whose edit form is open; polling skips re-render while set. */
     let editingJobId = null;
+    /** Job id whose URL inspector is open, and its last fetched state. */
+    let inspectingJobId = null;
+    let urlState = null;
 
     const el = (tag, className, text) => {
       const node = document.createElement(tag);
@@ -354,6 +375,17 @@
         const stop = el("button", "qbtn danger", "⏹ Stop");
         stop.onclick = () => jobAction("POST", `/jobs/${job.id}/cancel`);
         td.appendChild(stop);
+      }
+      if (job.type === "spider" || job.type === "full") {
+        const urls = el("button", "qbtn", "🔗 URLs");
+        urls.title = "Inspect crawled URLs and exclude paths on the fly";
+        urls.onclick = () => {
+          inspectingJobId = inspectingJobId === job.id ? null : job.id;
+          urlState = null;
+          renderQueue(lastJobs);
+          if (inspectingJobId) refreshUrls();
+        };
+        td.appendChild(urls);
       }
       return td;
     }
@@ -465,8 +497,146 @@
         if (editingJobId === job.id && job.status === "queued") {
           table.appendChild(editRow(job));
         }
+        if (inspectingJobId === job.id) {
+          table.appendChild(urlsRow(job));
+        }
       }
       panel.appendChild(table);
+    }
+
+    // --- Live URL inspector ----------------------------------------------
+
+    /** Path of a crawled URL, for display and for the exclude form. */
+    function urlPath(url) {
+      try { return new URL(url).pathname; } catch { return url; }
+    }
+
+    /** Folder of a URL path — what "exclude this folder" would target. */
+    function urlFolder(url) {
+      const p = urlPath(url);
+      const cut = p.replace(/\/+$/, "").lastIndexOf("/");
+      return cut > 0 ? p.slice(0, cut) : "/";
+    }
+
+    async function refreshUrls() {
+      if (!inspectingJobId) return;
+      try {
+        const response = await fetch(`${API_URL}/jobs/${inspectingJobId}/urls`);
+        if (!response.ok) { urlState = { error: (await response.json().catch(() => ({}))).error || "unavailable" }; }
+        else urlState = await response.json();
+      } catch {
+        return; // API blip — keep the last state, retry next tick
+      }
+      renderQueue(lastJobs);
+    }
+
+    async function pushExclude(path, remove = false) {
+      const response = await fetch(`${API_URL}/jobs/${inspectingJobId}/exclude`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, remove }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        alert("❌ " + (err.error || response.statusText));
+        return;
+      }
+      await refreshUrls();
+    }
+
+    function urlColumn(title, urls, count, opts = {}) {
+      const col = el("div", "urls-col");
+      col.appendChild(el("h4", null, `${title} (${count})`));
+      const list = el("div", "url-list");
+      if (urls.length === 0) {
+        list.appendChild(el("div", "url-row", opts.empty || "—"));
+      }
+      for (const url of urls) {
+        const row = el("div", `url-row${opts.dropped ? " dropped" : ""}`);
+        const code = el("code", null, urlPath(url));
+        code.title = url;
+        row.appendChild(code);
+        if (opts.excludable) {
+          const page = el("button", "xbtn", "✕ page");
+          page.title = `Stop crawling ${urlPath(url)}`;
+          page.onclick = () => pushExclude(urlPath(url));
+          const folder = el("button", "xbtn", "✕ folder");
+          const target = urlFolder(url);
+          folder.title = `Stop crawling everything under ${target}`;
+          folder.onclick = () => pushExclude(target);
+          row.append(page, folder);
+        }
+        list.appendChild(row);
+      }
+      col.appendChild(list);
+      return col;
+    }
+
+    function urlsRow(job) {
+      const tr = el("tr", "urls-row");
+      const td = el("td");
+      td.colSpan = 6;
+
+      if (!urlState) {
+        td.appendChild(el("div", null, "Loading URLs…"));
+        tr.appendChild(td);
+        return tr;
+      }
+      if (urlState.error) {
+        td.appendChild(el("div", null, "❌ " + urlState.error));
+        tr.appendChild(td);
+        return tr;
+      }
+
+      const cols = el("div", "urls-cols");
+      cols.appendChild(urlColumn("Queued", urlState.queued, urlState.counts.queued, {
+        excludable: job.status === "running" || job.status === "paused",
+        empty: job.status === "running" ? "Queue empty — finishing up" : "Nothing queued",
+      }));
+      cols.appendChild(urlColumn("Visited", [...urlState.visited].reverse(), urlState.counts.visited, {
+        empty: "Nothing crawled yet",
+      }));
+      cols.appendChild(urlColumn("Dropped by excludes", [...urlState.excluded].reverse(), urlState.counts.excluded, {
+        dropped: true,
+        empty: "None",
+      }));
+      td.appendChild(cols);
+
+      // Active live excludes, removable.
+      if (urlState.dynamicExcludes.length > 0) {
+        const chips = el("div", "chips");
+        for (const path of urlState.dynamicExcludes) {
+          const chip = el("span", "chip", path);
+          const remove = el("button", null, "×");
+          remove.title = "Remove this exclude";
+          remove.onclick = () => pushExclude(path, true);
+          chip.appendChild(remove);
+          chips.appendChild(chip);
+        }
+        td.appendChild(chips);
+      }
+
+      // Add an exclude by hand.
+      const form = el("div", "urls-form");
+      const input = el("input");
+      input.placeholder = "/branch-finder — exclude a folder or page";
+      const add = el("button", "qbtn danger", "Exclude");
+      const submit = () => {
+        const value = input.value.trim();
+        if (value) { input.value = ""; pushExclude(value); }
+      };
+      add.onclick = submit;
+      input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } };
+      form.append(input, add);
+      td.appendChild(form);
+
+      const note = el("div", null,
+        "Excludes apply to pages not yet fetched — already-saved pages stay in the scan.");
+      note.style.cssText = "font-size:12px;color:#777;margin-top:6px";
+      td.appendChild(note);
+
+      tr.appendChild(td);
+      return tr;
     }
 
     async function refreshQueue(force = false) {
@@ -481,6 +651,9 @@
 
     refreshQueue();
     setInterval(refreshQueue, 2000);
+    // The URL inspector follows a live crawl closely; it re-renders the
+    // queue itself, so it only ticks while open.
+    setInterval(() => { if (inspectingJobId) refreshUrls(); }, 1500);
   </script>
 </body>
 </html>
