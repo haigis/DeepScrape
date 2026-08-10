@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { processUrls } from './scraper.js';
 import { fetchSitemapUrls, discoverSitemaps } from './sitemap.js';
-import { spiderCrawl } from './spider.js';
+import { spiderCrawl, makeScope } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
 import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './scanStore.js';
@@ -50,6 +50,9 @@ const paramsToOptions = (params) => ({
     ? Number(params.maxDepth) : 2,
   // Optional folder scope, e.g. "/help" — only that subtree is crawled.
   pathPrefix: params.pathPrefix || null,
+  // Include/exclude lists (folders or exact pages); see makeScope().
+  includePaths: Array.isArray(params.includePaths) ? params.includePaths.filter(p => typeof p === 'string') : [],
+  excludePaths: Array.isArray(params.excludePaths) ? params.excludePaths.filter(p => typeof p === 'string') : [],
   // Hard page ceiling, enforced by the crawler itself (plan limits).
   maxPages: Number(params.maxPages) > 0 ? Number(params.maxPages) : null,
   screenshot: parseBoolean(params.screenshot),
@@ -157,12 +160,12 @@ app.post('/scrape/sitemap', (req, res) => {
  * Performs a spider crawl.
  */
 app.post('/scrape/spider', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, maxPages } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const job = createJob(
     'spider',
-    { url, rateLimit, maxDepth, pathPrefix, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal, gate) =>
       spiderCrawl([params.url], { ...paramsToOptions(params), onProgress, signal, gate }));
 
@@ -178,12 +181,12 @@ app.post('/scrape/spider', (req, res) => {
  * unlisted pages (linked but not in the sitemap) are both captured.
  */
 app.post('/scrape/full', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, maxPages } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const job = createJob(
     'full',
-    { url, rateLimit, maxDepth, pathPrefix, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     async (onProgress, params, signal, gate) => {
       const origin = new URL(params.url).origin;
       const host = new URL(params.url).hostname;
@@ -200,16 +203,11 @@ app.post('/scrape/full', (req, res) => {
         }
       }
 
-      // Same host only; honour the folder scope if one was given.
-      const prefix = params.pathPrefix
-        ? '/' + String(params.pathPrefix).trim().replace(/^\/+|\/+$/g, '')
-        : null;
+      // Same host only; honour include/exclude scope if given.
+      const inScope = makeScope(paramsToOptions(params));
       sitemapUrls = [...new Set(sitemapUrls)].filter(u => {
         try {
-          const parsed = new URL(u);
-          if (parsed.hostname !== host) return false;
-          if (prefix && parsed.pathname !== prefix && !parsed.pathname.startsWith(prefix + '/')) return false;
-          return true;
+          return new URL(u).hostname === host && inScope(u);
         } catch {
           return false;
         }

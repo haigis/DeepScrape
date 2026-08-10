@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from '../src/jobs.js';
+
+// Ordering assertions below assume one runner slot. Concurrency has its
+// own describe at the bottom.
+beforeAll(() => { process.env.MAX_CONCURRENT_JOBS = '1'; });
+afterAll(() => { delete process.env.MAX_CONCURRENT_JOBS; });
 
 /** Waits until nothing is queued or running, so tests start clean. */
 const waitForIdle = async (timeoutMs = 10000) => {
@@ -251,4 +256,31 @@ describe('preemptive priority scans (issue #13)', () => {
 
         await waitFor(() => getJob(longJob.id).status === 'completed', 8000);
     }, 25000);
+});
+
+describe('concurrent jobs', () => {
+    it('runs jobs in parallel up to MAX_CONCURRENT_JOBS', async () => {
+        const waitForIdleLocal = async () => {
+            while (listJobs(100).some(j => ['queued', 'running', 'paused'].includes(j.status))) {
+                await new Promise(r => setTimeout(r, 20));
+            }
+        };
+        await waitForIdleLocal();
+        process.env.MAX_CONCURRENT_JOBS = '2';
+        try {
+            let inFlight = 0;
+            let peak = 0;
+            const worker = () => createJob('test', {}, async () => {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise(r => setTimeout(r, 120));
+                inFlight--;
+            });
+            const jobs = [worker(), worker(), worker()];
+            await waitFor(() => jobs.every(j => getJob(j.id).status === 'completed'), 8000);
+            expect(peak).toBe(2); // two ran together, the third waited
+        } finally {
+            process.env.MAX_CONCURRENT_JOBS = '1';
+        }
+    }, 15000);
 });

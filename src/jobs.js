@@ -20,8 +20,8 @@ import { closeBrowser } from './scraper.js';
  * @property {string|null} error      Error message on failure.
  */
 
-/** Max concurrent non-priority jobs. */
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_JOBS ?? '3', 10);
+/** Max concurrent non-priority jobs. Read per-call so tests can pin it. */
+const maxConcurrent = () => Math.max(1, parseInt(process.env.MAX_CONCURRENT_JOBS ?? '3', 10) || 1);
 
 const jobs = new Map();
 /** @type {{job: Job, runner: Function}[]} */
@@ -121,7 +121,7 @@ async function pump() {
             void runJob(next.job, next.runner, true);
         } else {
             // Non-priority: respect concurrency limit.
-            if (runningCount >= MAX_CONCURRENT) break;
+            if (runningCount >= maxConcurrent()) break;
             queue.shift();
             void runJob(next.job, next.runner, false);
         }
