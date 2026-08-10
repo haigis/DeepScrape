@@ -2,20 +2,16 @@ import crypto from 'crypto';
 import { closeBrowser } from './scraper.js';
 
 /**
- * In-memory job queue. Jobs run sequentially (one Puppeteer workload at
- * a time); each POST /scrape* endpoint returns a job id immediately and
- * clients poll GET /jobs/:id for status.
- *
- * Queue management: queued jobs can be cancelled, reordered and have
- * their params edited (runners read job.params at start time). Running
- * jobs can be stopped via an AbortSignal that the scrapers check
- * between pages.
+ * In-memory job queue with configurable concurrency. Multiple jobs can
+ * run in parallel (each uses its own browser page within the shared
+ * Puppeteer instance). Priority jobs (single-page re-scans) still
+ * preempt long-running crawls via the pause gate.
  *
  * @typedef {object} Job
  * @property {string} id
  * @property {string} type            scrape | sitemap | spider | batch
  * @property {object} params          Job parameters; editable while queued.
- * @property {'queued'|'running'|'completed'|'failed'|'cancelled'} status
+ * @property {'queued'|'running'|'paused'|'completed'|'failed'|'cancelled'} status
  * @property {string} createdAt
  * @property {string} [startedAt]
  * @property {string} [finishedAt]
@@ -24,16 +20,18 @@ import { closeBrowser } from './scraper.js';
  * @property {string|null} error      Error message on failure.
  */
 
+/** Max concurrent non-priority jobs. */
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_JOBS ?? '3', 10);
+
 const jobs = new Map();
 /** @type {{job: Job, runner: Function}[]} */
 const queue = [];
-let running = false;
-/** AbortController of the currently running job, keyed by job id. */
-let runningAbort = null;
-let runningJobId = null;
-let runningJob = null;
-/** AbortControllers for priority jobs running alongside a parked crawl. */
-const priorityAborts = new Map();
+/** Currently running non-priority job count. */
+let runningCount = 0;
+/** AbortControllers keyed by job id for all running jobs. */
+const aborts = new Map();
+/** Set of currently running non-priority job ids (for preemption). */
+const runningNonPriority = new Set();
 
 /** Cap on finished jobs kept in memory. */
 const MAX_JOBS_KEPT = 200;
@@ -49,14 +47,11 @@ function trimOldJobs() {
 }
 
 /**
- * Creates a job and schedules it. The runner is called as
- * runner(onProgress, params, signal) when the job starts, so edits to
- * job.params while queued take effect.
+ * Creates a job and schedules it.
  * @param {string} type
  * @param {object} params
  * @param {(onProgress: (p: object) => void, params: object, signal: AbortSignal) => Promise<object>} runner
- * @param {{priority?: boolean}} [opts] - priority jobs jump the queue
- *        (used by single-page re-scans, which are quick).
+ * @param {{priority?: boolean}} [opts]
  * @returns {Job}
  */
 export function createJob(type, params, runner, opts = {}) {
@@ -74,7 +69,6 @@ export function createJob(type, params, runner, opts = {}) {
     jobs.set(job.id, job);
 
     if (opts.priority) {
-        // Ahead of normal jobs, but behind priority jobs already waiting.
         const firstNormal = queue.findIndex(q => !q.job.priority);
         queue.splice(firstNormal === -1 ? queue.length : firstNormal, 0, { job, runner });
     } else {
@@ -87,14 +81,11 @@ export function createJob(type, params, runner, opts = {}) {
 }
 
 /**
- * Preemption gate. A long crawl awaits this between pages, so a
- * priority job (an interactive single-page re-scan) can park it and run
- * immediately instead of waiting hours for the crawl to finish. The
- * crawl resumes from exactly where it stopped — no work is lost.
+ * Preemption gate. Long crawls await this between pages so priority
+ * jobs can park them and run immediately.
  */
 const pauseGate = {
     depth: 0,
-    /** Awaited by runners at each page boundary. */
     async wait() {
         while (this.depth > 0) {
             await new Promise(resolve => setTimeout(resolve, 150));
@@ -105,54 +96,56 @@ const pauseGate = {
     },
 };
 
-/** The non-priority job currently parked, if any. */
-let preemptedJob = null;
+/** Non-priority jobs currently paused for priority work. */
+const pausedJobs = new Set();
 
 async function pump() {
-    const next = queue[0];
-    if (!next) {
-        if (running) return;
-        // Queue drained — release the shared browser.
+    // Try to start as many queued jobs as concurrency allows.
+    while (queue.length > 0) {
+        const next = queue[0];
+
+        if (next.job.priority) {
+            // Priority jobs always run immediately — park non-priority jobs.
+            if (runningNonPriority.size > 0 && pausedJobs.size === 0) {
+                pauseGate.depth++;
+                for (const id of runningNonPriority) {
+                    const job = jobs.get(id);
+                    if (job && job.status === 'running') {
+                        job.status = 'paused';
+                        pausedJobs.add(id);
+                        console.log(`⏸ Job ${id} paused for priority work`);
+                    }
+                }
+            }
+            queue.shift();
+            void runJob(next.job, next.runner, true);
+        } else {
+            // Non-priority: respect concurrency limit.
+            if (runningCount >= MAX_CONCURRENT) break;
+            queue.shift();
+            void runJob(next.job, next.runner, false);
+        }
+    }
+
+    // If nothing is running at all, release the shared browser.
+    if (runningCount === 0 && aborts.size === 0 && queue.length === 0) {
         await closeBrowser();
-        return;
     }
+}
 
-    // A priority job may run while a long non-priority job is parked.
-    // Note this covers *successive* priority jobs too: once the crawl is
-    // parked, each queued priority job runs in turn before it resumes.
-    const isPriorityRun =
-        running && next.job.priority && runningJob != null && !runningJob.priority;
-
-    if (running && !isPriorityRun) return;
-
-    // Park the crawl on the first priority job only.
-    if (isPriorityRun && !preemptedJob) {
-        preemptedJob = runningJob;
-        pauseGate.depth++;
-        preemptedJob.status = 'paused';
-        console.log(`⏸ Job ${preemptedJob.id} paused for priority work`);
-    }
-
-    queue.shift();
-    const { job, runner } = next;
-    const wasPreempting = isPriorityRun;
-
-    if (!wasPreempting) running = true;
+async function runJob(job, runner, isPriority) {
     const abort = new AbortController();
-    if (!wasPreempting) {
-        runningAbort = abort;
-        runningJobId = job.id;
-        runningJob = job;
-    } else {
-        priorityAborts.set(job.id, abort);
+    aborts.set(job.id, abort);
+    if (!isPriority) {
+        runningCount++;
+        runningNonPriority.add(job.id);
     }
     job.status = 'running';
     job.startedAt = new Date().toISOString();
-    console.log(`▶️ Job ${job.id} (${job.type}) started${wasPreempting ? ' (preempting)' : ''}`);
+    console.log(`▶️ Job ${job.id} (${job.type}) started${isPriority ? ' (priority)' : ''} [${runningCount} running]`);
 
     try {
-        // Priority jobs never park themselves — only long jobs yield.
-        const gate = job.priority ? null : pauseGate;
+        const gate = isPriority ? null : pauseGate;
         job.result = await runner(progress => { job.progress = progress; }, job.params, abort.signal, gate);
         if (abort.signal.aborted) {
             job.status = 'cancelled';
@@ -172,31 +165,32 @@ async function pump() {
         }
     } finally {
         job.finishedAt = new Date().toISOString();
+        aborts.delete(job.id);
 
-        if (wasPreempting) {
-            priorityAborts.delete(job.id);
-            // Resume the parked crawl once no priority work remains.
-            if (!queue.some(entry => entry.job.priority)) {
-                pauseGate.depth = Math.max(0, pauseGate.depth - 1);
-                if (preemptedJob && preemptedJob.status === 'paused') {
-                    preemptedJob.status = 'running';
-                    console.log(`▶️ Job ${preemptedJob.id} resumed`);
-                }
-                preemptedJob = null;
-            }
-        } else {
-            running = false;
-            runningAbort = null;
-            runningJobId = null;
-            runningJob = null;
+        if (!isPriority) {
+            runningCount--;
+            runningNonPriority.delete(job.id);
         }
+
+        // Resume paused crawls once no priority work remains.
+        if (isPriority && !queue.some(e => e.job.priority)) {
+            pauseGate.depth = Math.max(0, pauseGate.depth - 1);
+            for (const id of pausedJobs) {
+                const j = jobs.get(id);
+                if (j && j.status === 'paused') {
+                    j.status = 'running';
+                    console.log(`▶️ Job ${id} resumed`);
+                }
+            }
+            pausedJobs.clear();
+        }
+
         void pump();
     }
 }
 
 /**
- * Cancels a job. Queued jobs leave the queue immediately; the running
- * job is aborted (scrapers stop at the next page boundary).
+ * Cancels a job.
  * @param {string} id
  * @returns {{ok: boolean, error?: string}}
  */
@@ -212,11 +206,13 @@ export function cancelJob(id) {
         return { ok: true };
     }
     if (job.status === 'running' || job.status === 'paused') {
-        (priorityAborts.get(id) ?? (runningJobId === id ? runningAbort : null))?.abort();
-        // A parked crawl must be released so it can observe the abort.
+        aborts.get(id)?.abort();
+        // Release pause gate if this was a paused job.
         if (job.status === 'paused') {
-            pauseGate.depth = Math.max(0, pauseGate.depth - 1);
-            preemptedJob = null;
+            pausedJobs.delete(id);
+            if (pausedJobs.size === 0) {
+                pauseGate.depth = Math.max(0, pauseGate.depth - 1);
+            }
         }
         return { ok: true };
     }
@@ -224,10 +220,7 @@ export function cancelJob(id) {
 }
 
 /**
- * Moves a queued job to a new position among the queued jobs (0 = next).
- * @param {string} id
- * @param {number} position
- * @returns {{ok: boolean, error?: string}}
+ * Moves a queued job to a new position (0 = next).
  */
 export function moveJob(id, position) {
     const idx = queue.findIndex(q => q.job.id === id);
@@ -241,10 +234,7 @@ export function moveJob(id, position) {
 }
 
 /**
- * Edits the params of a queued job (runners read params at start time).
- * @param {string} id
- * @param {object} patch - Whitelisted keys merged into job.params.
- * @returns {{ok: boolean, job?: Job, error?: string}}
+ * Edits the params of a queued job.
  */
 export function updateJob(id, patch) {
     const job = jobs.get(id);
@@ -258,7 +248,7 @@ export function updateJob(id, patch) {
 
 /**
  * @param {string} id
- * @returns {number|null} - Position among queued jobs (0 = runs next).
+ * @returns {number|null}
  */
 export function getQueuePosition(id) {
     const idx = queue.findIndex(q => q.job.id === id);
@@ -276,8 +266,7 @@ export function getJob(id) {
 
 /**
  * @param {number} limit
- * @returns {(Job & {queuePosition: number|null})[]} - Newest first, with
- *          each queued job's current position (0 = runs next).
+ * @returns {(Job & {queuePosition: number|null})[]}
  */
 export function listJobs(limit = 50) {
     const positions = new Map(queue.map((q, i) => [q.job.id, i]));
