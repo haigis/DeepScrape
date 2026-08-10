@@ -490,6 +490,171 @@ async function checkTerminology(pages, scanPath) {
 }
 
 /**
+ * Temporal staleness (issue #36): a site whose pages claim different
+ * years as "now" fights itself on recency — models discount content
+ * they can't date, and stale pages actively undermine fresh ones.
+ */
+function checkTemporal(pages) {
+    const findings = [];
+    const currentYear = new Date().getFullYear();
+
+    // Max copyright-style year per page.
+    const pageYears = [];
+    for (const page of pages) {
+        let max = null;
+        for (const m of page.text.matchAll(/(?:©|\(c\)|copyright)\s*(?:\d{4}\s*[-–]\s*)?(\d{4})/gi)) {
+            const year = Number(m[1]);
+            if (year >= 1995 && year <= currentYear + 1) max = Math.max(max ?? 0, year);
+        }
+        if (max != null) pageYears.push({ path: page.path, year: max });
+    }
+    if (pageYears.length === 0) return findings;
+
+    const stale = pageYears.filter(p => p.year <= currentYear - 2);
+    if (stale.length > 0) {
+        findings.push({
+            id: 'temporal-stale-copyright',
+            category: 'facts',
+            severity: stale.length > pageYears.length * 0.5 ? 'medium' : 'low',
+            confidence: 'confirmed',
+            title: `${stale.length} page${stale.length === 1 ? '' : 's'} carrying a copyright year of ${currentYear - 2} or older`,
+            detail: `The newest copyright year on these pages is at least two years old — the page itself testifies that nobody has touched it.`,
+            why: 'Models weight recency; a page that dates itself as stale is discounted, and its facts lose against fresher contradictions.',
+            evidence: stale.slice(0, MAX_EVIDENCE).map(p => ({ value: `© ${p.year}`, pages: [p.path], count: 1 })),
+            pagesAffected: stale.length,
+        });
+    }
+
+    const distinctYears = new Set(pageYears.map(p => p.year));
+    if (distinctYears.size > 1) {
+        const byYear = new Map();
+        for (const p of pageYears) {
+            if (!byYear.has(p.year)) byYear.set(p.year, []);
+            byYear.get(p.year).push(p.path);
+        }
+        findings.push({
+            id: 'temporal-mixed-copyright-years',
+            category: 'facts',
+            severity: 'low',
+            confidence: 'confirmed',
+            title: `${distinctYears.size} different copyright years across the site`,
+            detail: 'Different pages claim different years — a machine reading the site cannot tell which parts are current.',
+            why: 'Mixed self-dating splits the site into "fresh" and "stale" halves; only one half gets believed.',
+            evidence: [...byYear.entries()]
+                .sort((a, b) => b[0] - a[0])
+                .slice(0, MAX_EVIDENCE)
+                .map(([year, paths]) => ({ value: `© ${year}`, pages: paths.slice(0, 8), count: paths.length })),
+            pagesAffected: pageYears.length,
+        });
+    }
+
+    return findings;
+}
+
+const ORG_TYPE_RE = /Organization|Corporation|LocalBusiness|BankOrCreditUnion/i;
+
+/**
+ * Cross-format parity + entity anchoring (issues #36/#37): JSON-LD
+ * must agree with the visible page, and one organisation should present
+ * one identity — anchored to the wider knowledge graph via sameAs.
+ */
+function checkEntityAnchoring(pages) {
+    const findings = [];
+    const orgNodes = pages.flatMap(p =>
+        p.jsonLd.filter(n => ORG_TYPE_RE.test(String(n['@type'] ?? ''))).map(node => ({ node, path: p.path })));
+
+    // Type coverage: JSON-LD exists but never declares the organisation.
+    if (orgNodes.length === 0) {
+        if (pages.some(p => p.jsonLd.length > 0)) {
+            findings.push({
+                id: 'no-organization-entity',
+                category: 'structured-data',
+                severity: 'medium',
+                confidence: 'confirmed',
+                title: 'JSON-LD present but no Organization entity anywhere',
+                detail: 'The site uses structured data yet never states who it belongs to in machine-readable form.',
+                why: 'Organization is the anchor entity every other fact hangs off. Without it, machines must infer who "we" is from prose.',
+                evidence: [],
+                pagesAffected: pages.length,
+            });
+        }
+        return findings;
+    }
+
+    // Cross-format parity: JSON-LD phone vs the page's own visible phones.
+    const parityMisses = [];
+    for (const page of pages) {
+        for (const node of page.jsonLd) {
+            if (!ORG_TYPE_RE.test(String(node['@type'] ?? ''))) continue;
+            const declared = typeof node.telephone === 'string' ? node.telephone.trim() : null;
+            if (!declared || page.facts.phones.size === 0) continue;
+            const pageKeys = [...page.facts.phones].map(phoneKey);
+            if (!pageKeys.includes(phoneKey(declared))) {
+                parityMisses.push({
+                    path: page.path,
+                    value: `JSON-LD says ${norm(declared)} · page says ${[...page.facts.phones][0]}`,
+                });
+            }
+        }
+    }
+    if (parityMisses.length > 0) {
+        findings.push({
+            id: 'jsonld-page-phone-mismatch',
+            category: 'structured-data',
+            severity: 'medium',
+            confidence: 'strong',
+            title: `${parityMisses.length} page${parityMisses.length === 1 ? '' : 's'} where JSON-LD and the visible page state different phone numbers`,
+            detail: 'The structured data declares one number while the page text shows another.',
+            why: 'Extraction pipelines cross-check formats; structured data contradicting visible content is treated as unreliable — and Google\'s guidelines treat it as a violation.',
+            evidence: parityMisses.slice(0, MAX_EVIDENCE).map(m => ({ value: m.value, pages: [m.path], count: 1 })),
+            pagesAffected: parityMisses.length,
+        });
+    }
+
+    // sameAs anchoring: none at all, or different sets on different pages.
+    const sameAsSets = new Map(); // canonical key -> { display, pages }
+    let anySameAs = false;
+    for (const { node, path } of orgNodes) {
+        const sameAs = (Array.isArray(node.sameAs) ? node.sameAs : typeof node.sameAs === 'string' ? [node.sameAs] : [])
+            .filter(u => typeof u === 'string' && u.trim());
+        if (sameAs.length === 0) continue;
+        anySameAs = true;
+        const key = sameAs.map(u => u.trim().toLowerCase().replace(/\/+$/, '')).sort().join(' ');
+        if (!sameAsSets.has(key)) sameAsSets.set(key, { display: sameAs.join(' · '), pages: new Set() });
+        sameAsSets.get(key).pages.add(path);
+    }
+    if (!anySameAs) {
+        findings.push({
+            id: 'no-sameas-anchoring',
+            category: 'structured-data',
+            severity: 'low',
+            confidence: 'confirmed',
+            title: 'Organization entity has no sameAs links',
+            detail: 'The organisation never points at its authoritative profiles (Wikidata, Wikipedia, LinkedIn, Companies House).',
+            why: 'sameAs joins your site to the knowledge graph machines already trust — the difference between "a company called Acme" and *the* Acme.',
+            evidence: [],
+            pagesAffected: new Set(orgNodes.map(o => o.path)).size,
+        });
+    } else if (sameAsSets.size > 1) {
+        findings.push({
+            id: 'inconsistent-sameas',
+            category: 'structured-data',
+            severity: 'low',
+            confidence: 'strong',
+            title: `${sameAsSets.size} different sameAs sets across the site`,
+            detail: 'Different pages anchor the organisation to different external profiles.',
+            why: 'One entity should have one set of authoritative anchors; competing sets split the identity machines assemble.',
+            evidence: [...sameAsSets.values()].slice(0, MAX_EVIDENCE).map(s => ({
+                value: s.display, pages: [...s.pages].slice(0, 8), count: s.pages.size,
+            })),
+            pagesAffected: new Set([...sameAsSets.values()].flatMap(s => [...s.pages])).size,
+        });
+    }
+
+    return findings;
+}
+
+/**
  * Builds the full consistency report for a scan.
  * @param {string} scanPath
  * @param {string} scan - "<domain>/<date>", echoed back.
@@ -505,6 +670,8 @@ export async function buildConsistencyReport(scanPath, scan) {
         ...checkFacts(pages),
         ...checkMetadata(pages),
         ...checkStructuredData(pages),
+        ...checkTemporal(pages),
+        ...checkEntityAnchoring(pages),
         ...await checkTerminology(pages, scanPath),
     ];
 
