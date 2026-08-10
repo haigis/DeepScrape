@@ -151,6 +151,18 @@ export async function scrapePage(browser, url, outDir, options = {}) {
     await page.setViewport({ width: 1440, height: 900 });
 
     try {
+        // When the scan wants neither screenshots nor images, the pixels
+        // can't matter — skip image/media/font downloads for a much
+        // faster page load. Never active on screenshot scans (the
+        // archive would show broken images).
+        if (!screenshot && !downloadImages) {
+            await page.setRequestInterception(true);
+            page.on('request', (request) => {
+                if (['image', 'media', 'font'].includes(request.resourceType())) request.abort();
+                else request.continue();
+            });
+        }
+
         const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
         const status = response?.status();
 

@@ -126,7 +126,8 @@ export async function spiderCrawl(startUrls, options = {}) {
     await fs.mkdir(outDir, { recursive: true });
 
     console.log(`🕷️ Starting spider crawl on: ${startUrls[0]} (maxDepth: ${maxDepth}`
-        + `${pathPrefix ? `, scoped to ${pathPrefix}` : ''})`);
+        + `${pathPrefix ? `, scoped to ${pathPrefix}` : ''}`
+        + `, workers: ${Math.max(1, Math.min(8, Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 3))})`);
 
     const visited = new Set();
     const queued = new Set();
@@ -169,72 +170,99 @@ export async function spiderCrawl(startUrls, options = {}) {
     const maxPages = Number(options.maxPages) > 0 ? Number(options.maxPages) : null;
     let limitReached = false;
 
-    while (queue.length) {
-        if (maxPages && visited.size >= maxPages) {
-            limitReached = true;
-            console.log(`🛑 Page limit reached (${maxPages}) — stopping crawl.`);
-            break;
-        }
-        // Park here when a priority job needs the runner — the crawl
-        // resumes from this exact point, losing no work.
-        await gate?.wait();
-        if (signal?.aborted) {
-            console.log('⏹ Aborted — stopping crawl.');
-            break;
-        }
-        const { url, depth } = queue.shift();
-        if (visited.has(url) || isImageUrl(url)) continue;
-        // A live exclude may have arrived after this URL was queued.
-        if (dynamicallyExcluded(url)) {
-            excludedLive.push(url);
-            continue;
-        }
+    /**
+     * Concurrent workers over one shared queue. Each scrapePage opens
+     * its own tab in the shared browser, so N workers ≈ N× throughput.
+     * Single-threaded JS keeps the queue/visited bookkeeping safe; the
+     * page cap can overshoot by at most workers−1 pages. Rate limit is
+     * per worker — the polite delay a real visitor produces per tab.
+     */
+    const concurrency = Math.max(1, Math.min(8,
+        Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 3));
+    let inFlight = 0;
 
-        visited.add(url);
-        console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
-        onProgress?.({ done: visited.size, total: visited.size + queue.length, currentUrl: url });
-
-        const result = await scrapePage(browser, url, outDir, { ...opts, dedupe: contentHashes });
-
-        if (!result.ok) {
-            // Navigation error or HTTP >= 400 — record and move on.
-            // Non-HTML content types are skipped but not "broken".
-            if (!result.error?.startsWith('non-HTML')) {
-                console.error(`❌ Broken link: ${url} (${result.error})`);
-                brokenLinks.add(url);
+    async function worker() {
+        for (;;) {
+            if (signal?.aborted) return;
+            // Park here when a priority job needs the runner — the crawl
+            // resumes from this exact point, losing no work.
+            await gate?.wait();
+            if (maxPages && visited.size >= maxPages) {
+                if (!limitReached) console.log(`🛑 Page limit reached (${maxPages}) — stopping crawl.`);
+                limitReached = true;
+                return;
             }
-            continue;
-        }
 
-        if (result.duplicateOf) {
-            duplicates.set(url, result.duplicateOf);
-        }
+            const entry = queue.shift();
+            if (!entry) {
+                // Empty queue: done only once no worker can still enqueue.
+                if (inFlight === 0) return;
+                await waitMs(50);
+                continue;
+            }
+            const { url, depth } = entry;
+            if (visited.has(url) || isImageUrl(url)) continue;
+            // A live exclude may have arrived after this URL was queued.
+            if (dynamicallyExcluded(url)) {
+                excludedLive.push(url);
+                continue;
+            }
 
-        for (const rawLink of result.links) {
-            let link;
+            visited.add(url);
+            console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
+            onProgress?.({ done: visited.size, total: visited.size + queue.length, currentUrl: url });
+
+            inFlight++;
+            let result;
             try {
-                link = normalizeUrl(rawLink);
-            } catch {
-                continue; // Ignore invalid URLs
+                result = await scrapePage(browser, url, outDir, { ...opts, dedupe: contentHashes });
+            } finally {
+                inFlight--;
             }
-            if (link === url) continue;
 
-            linksList.add(link);
-
-            // Record who links to this URL (real incoming-links map).
-            if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
-            incomingLinks.get(link).add(url);
-
-            if (isImageUrl(link) || queued.has(link)) continue;
-
-            if (new URL(link).hostname === domain && inScope(link) && depth < maxDepth) {
-                queued.add(link);
-                queue.push({ url: link, depth: depth + 1 });
+            if (!result.ok) {
+                // Navigation error or HTTP >= 400 — record and move on.
+                // Non-HTML content types are skipped but not "broken".
+                if (!result.error?.startsWith('non-HTML')) {
+                    console.error(`❌ Broken link: ${url} (${result.error})`);
+                    brokenLinks.add(url);
+                }
+                continue;
             }
+
+            if (result.duplicateOf) {
+                duplicates.set(url, result.duplicateOf);
+            }
+
+            for (const rawLink of result.links) {
+                let link;
+                try {
+                    link = normalizeUrl(rawLink);
+                } catch {
+                    continue; // Ignore invalid URLs
+                }
+                if (link === url) continue;
+
+                linksList.add(link);
+
+                // Record who links to this URL (real incoming-links map).
+                if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
+                incomingLinks.get(link).add(url);
+
+                if (isImageUrl(link) || queued.has(link)) continue;
+
+                if (new URL(link).hostname === domain && inScope(link) && depth < maxDepth) {
+                    queued.add(link);
+                    queue.push({ url: link, depth: depth + 1 });
+                }
+            }
+
+            if (rateLimit > 0) await waitMs(rateLimit);
         }
-
-        if (rateLimit > 0) await waitMs(rateLimit);
     }
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    if (signal?.aborted) console.log('⏹ Aborted — stopping crawl.');
 
     console.log(`✅ Spider crawl completed. Visited ${visited.size} pages, ${brokenLinks.size} broken.`);
 
