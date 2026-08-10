@@ -34,7 +34,7 @@ export function generateOutputDir(baseUrl) {
     try {
         const domain = new URL(baseUrl).hostname;
         const datePart = new Date().toISOString().slice(0, 10); // 2026-08-08
-        return path.join('output', domain, datePart);
+        return path.join(process.env.OUTPUT_DIR ?? 'output', domain, datePart);
     } catch (error) {
         console.error("❌ Error in generateOutputDir():", error);
         return "output/unknown"; // Prevents returning undefined

@@ -26,7 +26,7 @@ if (process.env.ALLOWED_ORIGINS) {
 
 app.use(express.json());
 
-const OUTPUT_ROOT = path.resolve(process.cwd(), 'output');
+const OUTPUT_ROOT = path.resolve(process.cwd(), process.env.OUTPUT_DIR ?? 'output');
 
 // Serve static files (scanned results)
 app.use('/output', express.static(OUTPUT_ROOT));
