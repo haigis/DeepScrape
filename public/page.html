@@ -12,6 +12,8 @@
     .g-center rect { fill: var(--ink); }
     .g-center text { fill: #fff; font-weight: bold; }
     .g-in rect { fill: #e6f4ec; stroke: #1a8a4a; }
+    .g-in.chrome-group rect { fill: #f0f0f0; stroke: #999; stroke-dasharray: 4 2; }
+    .g-in.chrome-group text { fill: #777; }
     .g-out rect { fill: #e8f1fc; stroke: #0b6bcb; }
     .g-out.broken rect { fill: #fdeaea; stroke: #c62828; }
     .g-out.external rect { fill: #f3eefe; stroke: #8a3ffc; }
@@ -464,11 +466,25 @@
       const section = el("section");
       section.appendChild(el("h2", null, "Link neighbourhood"));
 
-      // Chrome links (nav/header/footer) repeat on every page and would
-      // make the graph claim every page links to every other page.
+      // Chrome links (nav/header/footer) repeat on every page — show one
+      // summary node per region instead of one node per page.
       const contentIn = page.links.incoming.filter(i => (i.region ?? 'content') === 'content');
-      const chromeIn = page.links.incoming.length - contentIn.length;
-      const inbound = contentIn.slice(0, 8);
+      const chromeByRegion = {};
+      for (const link of page.links.incoming) {
+        const region = link.region ?? 'content';
+        if (region === 'content') continue;
+        if (!chromeByRegion[region]) chromeByRegion[region] = [];
+        chromeByRegion[region].push(link);
+      }
+      // One summary node per chrome region (nav, footer, header, custom groups).
+      const chromeSummaryNodes = Object.entries(chromeByRegion).map(([region, links]) => ({
+        isChromeGroup: true,
+        region,
+        count: links.length,
+        anchorTexts: [...new Set(links.flatMap(l => l.anchorTexts || []))].slice(0, 5),
+        label: region.charAt(0).toUpperCase() + region.slice(1) + " - on " + links.length + " page" + (links.length === 1 ? "" : "s"),
+      }));
+      const inbound = [...contentIn.slice(0, 8), ...chromeSummaryNodes];
       const outInternal = page.links.internal.slice(0, 8);
       const outExternal = page.links.external.slice(0, 4);
       const outgoing = [...outInternal, ...outExternal.map(e => ({ ...e, external: true }))];
@@ -495,7 +511,7 @@
 
       root.appendChild(Object.assign(
         svgEl("text", { class: "col-title", x: 0, y: 16 }),
-        { textContent: `Linked from in content (${page.links.counts.incomingContent ?? page.links.counts.incoming})` }));
+        { textContent: `Linked from (${page.links.counts.incoming})` }));
       root.appendChild(Object.assign(
         svgEl("text", { class: "col-title", x: width, y: 16, "text-anchor": "end" }),
         { textContent: `Links out (${page.links.counts.internal + page.links.counts.external})` }));
@@ -520,41 +536,48 @@
           root.appendChild(edge);
           edges.push(edge);
 
+          const isChromeGroup = item.isChromeGroup;
           const cls = side === "in"
-            ? "gnode g-in"
+            ? `gnode g-in${isChromeGroup ? " chrome-group" : ""}`
             : `gnode g-out${item.external ? " external" : ""}${item.broken ? " broken" : ""}`;
           const g = svgEl("g", { class: cls });
           g.appendChild(svgEl("rect", { x, y: y - boxH / 2, width: boxW, height: boxH }));
 
-          // Label a node by the page it *is* (its H1), not by the anchor
-          // text used to reach it — nav links repeat the same words on
-          // every page, which told you nothing about the source.
-          const label = item.external
-            ? item.host
-            : (item.h1 || item.title || sitePathOf(item.path) || item.url);
+          // Chrome group nodes show "Nav — on 39 pages"; regular nodes
+          // show the page's H1.
+          const label = isChromeGroup
+            ? item.label
+            : item.external
+              ? item.host
+              : (item.h1 || item.title || sitePathOf(item.path) || item.url);
           g.appendChild(Object.assign(
             svgEl("text", { x: x + 9, y: y + 4 }),
             { textContent: shortLabel(label) }));
 
           g.addEventListener("mouseenter", (event) => {
             edge.classList.add("hot");
-            const rows = side === "in"
+            const rows = isChromeGroup
               ? [
-                  sitePathOf(item.path) || item.url,
-                  item.anchorTexts.length ? `Linked as: “${item.anchorTexts.join('”, “')}”` : "(no anchor text)",
-                  item.occurrences > 1 ? `Links here ${item.occurrences}×` : null,
-                  item.nofollow ? "nofollow" : null,
+                  `${item.count} pages have this link in their ${item.region}`,
+                  item.anchorTexts.length ? `Linked as: "${item.anchorTexts.join('", "')}"` : null,
                 ]
-              : [
-                  item.external ? item.url : (sitePathOf(item.path) || item.url),
-                  item.text ? `Linked as: “${item.text}”` : "(no anchor text)",
-                  item.external ? `External host: ${item.host}` : (item.broken ? "Broken link" : (item.scraped ? "Target scraped" : "Target not scraped")),
-                  item.nofollow ? "nofollow" : null,
-                ];
+              : side === "in"
+                ? [
+                    sitePathOf(item.path) || item.url,
+                    item.anchorTexts.length ? `Linked as: "${item.anchorTexts.join('", "')}"` : "(no anchor text)",
+                    item.occurrences > 1 ? `Links here ${item.occurrences}×` : null,
+                    item.nofollow ? "nofollow" : null,
+                  ]
+                : [
+                    item.external ? item.url : (sitePathOf(item.path) || item.url),
+                    item.text ? `Linked as: "${item.text}"` : "(no anchor text)",
+                    item.external ? `External host: ${item.host}` : (item.broken ? "Broken link" : (item.scraped ? "Target scraped" : "Target not scraped")),
+                    item.nofollow ? "nofollow" : null,
+                  ];
             showTip(event,
-              item.h1 || item.title || (side === "in" ? "Links to this page" : "This page links to"),
+              isChromeGroup ? `${item.region} link` : (item.h1 || item.title || (side === "in" ? "Links to this page" : "This page links to")),
               rows.filter(Boolean),
-              item.pageUrl ? "Click to open that page’s dashboard" : "Click to open the live URL");
+              isChromeGroup ? "Site-wide chrome link — not a content reference" : (item.pageUrl ? "Click to open that page's dashboard" : "Click to open the live URL"));
           });
           g.addEventListener("mousemove", (event) => {
             if (tipEl && tipEl.style.display === "block") {
@@ -563,11 +586,13 @@
             }
           });
           g.addEventListener("mouseleave", () => { edge.classList.remove("hot"); hideTip(); });
-          g.addEventListener("click", () => {
-            hideTip();
-            if (item.pageUrl) location.href = item.pageUrl;
-            else window.open(item.url, "_blank", "noopener");
-          });
+          if (!isChromeGroup) {
+            g.addEventListener("click", () => {
+              hideTip();
+              if (item.pageUrl) location.href = item.pageUrl;
+              else window.open(item.url, "_blank", "noopener");
+            });
+          }
 
           root.appendChild(g);
         });
@@ -589,8 +614,9 @@
       section.appendChild(panel);
 
       const hint = el("p", "graph-hint");
-      hint.textContent = "Nodes are labelled by each page’s H1. Hover to highlight the connection and see the anchor text used; click to jump to that page’s dashboard. "
-        + `Showing up to 8 inbound, 8 internal outbound and 4 external hosts.`;
+      hint.textContent = "Nodes are labelled by each page's H1. Hover to highlight the connection and see the anchor text used; click to jump to that page's dashboard. "
+        + "Nav/footer links are collapsed to one node per region. "
+        + `Showing up to 8 content inbound, 8 internal outbound and 4 external hosts.`;
       section.appendChild(hint);
       return section;
     }
@@ -921,7 +947,7 @@
       if (!texts || texts.length === 0) {
         td.appendChild(el("span", "anchor-none", "(no anchor text)"));
       } else {
-        td.appendChild(el("span", "anchor-text", `“${texts[0]}”`));
+        td.appendChild(el("span", "anchor-text", `"${texts[0]}"`));
         if (texts.length > 1) {
           td.append(" ");
           td.appendChild(el("span", "badge b-count", `+${texts.length - 1} more`));
