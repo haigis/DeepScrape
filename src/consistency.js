@@ -1,7 +1,9 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { extractPageMeta, extractAnchors, urlToScanPath, getInboundIndex } from './scanStore.js';
-import { rateFindings } from './rating.js';
+import { rateFindings, rateFindingsV3 } from './rating.js';
+import { analyzePageExtractability, checkExtractability } from './extractability.js';
+import { analyzeAccess } from './access.js';
 
 /**
  * Content consistency engine.
@@ -130,6 +132,7 @@ async function collectPages(scanPath) {
                 jsonLd: blocks,
                 invalidJsonLd: invalid,
                 anchors: extractAnchors(html),
+                extract: analyzePageExtractability(html),
             });
         });
 
@@ -510,17 +513,34 @@ export async function buildConsistencyReport(scanPath, scan) {
     const rating = rateFindings(findings, pages.length);
     const score = rating.score;
 
+    // rating.v3 (shadow): the v2 findings plus the access and
+    // extractability analyzers, scored with reach × confidence under
+    // six pillars. Shown score stays v2 until v3 is calibrated
+    // (docs/scoring-methodology-v3.md in the coherence repo). The new
+    // findings ship in a separate array so consumers persisting the v2
+    // category set are unaffected.
+    const domain = scan.split('/')[0];
+    const { findings: accessFindings, metrics: accessMetrics } =
+        await analyzeAccess(scanPath, domain).catch(() => ({ findings: [], metrics: null }));
+    const extractabilityFindings = checkExtractability(pages);
+    const v3Findings = [...accessFindings, ...extractabilityFindings];
+    const ratingV3 = rateFindingsV3([...findings, ...v3Findings], pages.length);
+
     const summary = { high: 0, medium: 0, low: 0 };
     for (const finding of findings) summary[finding.severity]++;
 
     const order = { high: 0, medium: 1, low: 2 };
     findings.sort((a, b) => order[a.severity] - order[b.severity] || b.pagesAffected - a.pagesAffected);
+    v3Findings.sort((a, b) => order[a.severity] - order[b.severity] || b.pagesAffected - a.pagesAffected);
 
     return {
         scan,
         pages: pages.length,
         score,
         rating,
+        ratingV3,
+        v3Findings,
+        accessMetrics,
         summary,
         byCategory: {
             facts: findings.filter(f => f.category === 'facts').length,

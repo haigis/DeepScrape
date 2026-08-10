@@ -4,6 +4,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { buildConsistencyReport } from '../src/consistency.js';
 
+// The v3 access analyzer makes live robots/llms fetches; keep unit
+// tests offline (access has its own tests with an injected fetch).
+process.env.DS_V3_NETWORK = 'false';
+
 let scan;
 
 const write = async (rel, content) => {
