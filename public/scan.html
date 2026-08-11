@@ -171,6 +171,14 @@
     </div>
 
     <div class="form-group switch-container">
+      <label for="cookieDismissalToggle">Dismiss cookie banners (screenshots only)</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="cookieDismissalToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="form-group switch-container">
       <label for="downloadImagesToggle">Download Images</label>
       <label class="toggle-switch">
         <input type="checkbox" id="downloadImagesToggle">
@@ -259,6 +267,9 @@
       // ✅ **Only include these properties if they are true**
       if (document.getElementById("screenshotToggle").checked) {
         requestBody.screenshot = true;
+      }
+      if (!document.getElementById("cookieDismissalToggle").checked) {
+        requestBody.cookieDismissal = false;
       }
       if (document.getElementById("downloadImagesToggle").checked) {
         requestBody.downloadImages = true;

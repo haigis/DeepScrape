@@ -62,6 +62,8 @@ const paramsToOptions = (params) => ({
   downloadImages: parseBoolean(params.downloadImages),
   // Offline copies are the default; pass offline:false to opt out.
   offline: params.offline === undefined ? true : parseBoolean(params.offline),
+  // Cookie-banner dismissal (screenshot-only concern); default on.
+  cookieDismissal: params.cookieDismissal === undefined ? true : parseBoolean(params.cookieDismissal),
 });
 
 /**
@@ -178,13 +180,13 @@ const registerLiveCrawl = (jobId, live) => {
 };
 
 app.post('/scrape/spider', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const live = { dynamicExcludes: [] };
   const job = createJob(
     'spider',
-    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     (onProgress, params, signal, gate) =>
       spiderCrawl([params.url], { ...paramsToOptions(params), live, onProgress, signal, gate }));
   registerLiveCrawl(job.id, live);
@@ -201,13 +203,13 @@ app.post('/scrape/spider', (req, res) => {
  * unlisted pages (linked but not in the sitemap) are both captured.
  */
 app.post('/scrape/full', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const live = { dynamicExcludes: [] };
   const job = createJob(
     'full',
-    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
+    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
     async (onProgress, params, signal, gate) => {
       const origin = new URL(params.url).origin;
       const host = new URL(params.url).hostname;

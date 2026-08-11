@@ -28,6 +28,11 @@ export const defaultOptions = Object.freeze({
     // Saved pages are self-contained by default: assets are downloaded
     // and references rewritten so viewing a scan never calls the origin.
     offline: true,
+    // Cookie-banner dismissal exists for clean screenshots — the HTML
+    // is captured either way. It only runs before a screenshot, and a
+    // site whose consent UI resists dismissal (up to 5s of selector
+    // waits per page) can turn it off entirely.
+    cookieDismissal: true,
 });
 
 /**
@@ -145,7 +150,7 @@ async function downloadPageImages(page, pageUrl, imgDir) {
  * @returns {Promise<ScrapeResult>}
  */
 export async function scrapePage(browser, url, outDir, options = {}) {
-    const { screenshot, downloadImages, offline } = resolveOptions(options);
+    const { screenshot, downloadImages, offline, cookieDismissal } = resolveOptions(options);
     console.log(`🌍 Navigating: ${url}`);
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
@@ -177,7 +182,11 @@ export async function scrapePage(browser, url, outDir, options = {}) {
             return { ok: false, status, links: [], error: `non-HTML content-type: ${contentType}` };
         }
 
-        await handleCookieBanner(page, url);
+        // Dismissal is a screenshot concern only (the HTML is captured
+        // regardless), and per-site configurable — see defaultOptions.
+        if (screenshot && cookieDismissal) {
+            await handleCookieBanner(page, url);
+        }
         await waitMs(2000);
 
         // Collect links from the *rendered* DOM — catches JS-injected links
