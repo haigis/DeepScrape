@@ -170,7 +170,9 @@ app.post('/scrape/sitemap', (req, res) => {
 const liveCrawls = new Map();
 const registerLiveCrawl = (jobId, live) => {
   liveCrawls.set(jobId, live);
-  while (liveCrawls.size > 100) {
+  // Finished crawls hold only a small snapshot (spider.js swaps the
+  // closure at crawl end), but keep the roster short regardless.
+  while (liveCrawls.size > 20) {
     liveCrawls.delete(liveCrawls.keys().next().value);
   }
 };

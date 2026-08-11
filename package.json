@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "api": "node src/api.js",
+    "api": "node --max-old-space-size=6144 src/api.js",
     "audit": "node src/accessibility.js",
     "test": "vitest run"
   },

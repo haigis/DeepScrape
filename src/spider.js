@@ -14,6 +14,10 @@ import { generateOutputDir } from './fileHandler.js';
  * @param {{pathPrefix?: string, includePaths?: string[], excludePaths?: string[]}} options
  * @returns {(url: string) => boolean}
  */
+/** Memory bounds for the per-crawl link graph (issue coherence#60). */
+const MAX_TRACKED_LINKS = Number(process.env.DS_MAX_TRACKED_LINKS) || 150000;
+const MAX_SOURCES_PER_LINK = 25;
+
 /** Crawl workers: request → env → default 4, clamped to 1-16. */
 export const crawlConcurrency = (options = {}) => Math.max(1, Math.min(16,
     Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 4));
@@ -246,11 +250,20 @@ export async function spiderCrawl(startUrls, options = {}) {
                 }
                 if (link === url) continue;
 
-                linksList.add(link);
+                // Bounded link-graph tracking (issue coherence#60): large
+                // sites × links-per-page × concurrent crawls otherwise
+                // grows these maps past the Node heap. Caps keep the
+                // analytics useful while bounding memory; crawling itself
+                // (queued/visited) is unaffected.
+                if (linksList.size < MAX_TRACKED_LINKS) linksList.add(link);
 
                 // Record who links to this URL (real incoming-links map).
-                if (!incomingLinks.has(link)) incomingLinks.set(link, new Set());
-                incomingLinks.get(link).add(url);
+                let sources = incomingLinks.get(link);
+                if (!sources && incomingLinks.size < MAX_TRACKED_LINKS) {
+                    sources = new Set();
+                    incomingLinks.set(link, sources);
+                }
+                if (sources && sources.size < MAX_SOURCES_PER_LINK) sources.add(url);
 
                 if (isImageUrl(link) || queued.has(link)) continue;
 
@@ -282,6 +295,19 @@ export async function spiderCrawl(startUrls, options = {}) {
         JSON.stringify(Object.fromEntries(duplicates), null, 2),
         'utf8',
     );
+
+    // Release the crawl's URL structures from the live inspector: swap
+    // the getState closure (which pins visited/queue/excludes) for a
+    // small frozen snapshot, so finished crawls can be garbage
+    // collected while the queue UI keeps a useful summary.
+    if (live) {
+        const snapshot = {
+            visited: [...visited].slice(0, 5000),
+            queued: [],
+            excluded: excludedLive.slice(0, 1000),
+        };
+        live.getState = () => snapshot;
+    }
 
     console.log(`📁 Saved crawl results to: ${outDir}`);
     return {
