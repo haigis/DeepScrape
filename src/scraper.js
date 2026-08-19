@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import crypto from 'crypto';
 import path from 'path';
 import puppeteer from 'puppeteer';
+import { BROWSER_LAUNCH_OPTIONS } from './browserOptions.js';
 import axios from 'axios';
 import { fixRelativePaths, generateOutputDir } from './fileHandler.js';
 import { captureWebpScreenshot } from './screenshot.js';
@@ -56,7 +57,7 @@ let sharedBrowser = null;
  */
 export async function getBrowser() {
     if (!sharedBrowser || !sharedBrowser.connected) {
-        sharedBrowser = await puppeteer.launch({ headless: true });
+        sharedBrowser = await puppeteer.launch(BROWSER_LAUNCH_OPTIONS);
     }
     return sharedBrowser;
 }
