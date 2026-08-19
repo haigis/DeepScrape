@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer';
+import { BROWSER_LAUNCH_OPTIONS } from './browserOptions.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import axe from 'axe-core';
@@ -196,10 +197,7 @@ export async function analyzeScan(scanPath) {
         return;
     }
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    const browser = await puppeteer.launch(BROWSER_LAUNCH_OPTIONS);
 
     try {
         const page = await browser.newPage();
