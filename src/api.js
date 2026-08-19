@@ -11,6 +11,7 @@ import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './s
 import { getConsistencyReport } from './consistency.js';
 import { buildDashboard, buildPageAttributes } from './analytics.js';
 import { extractScanQa } from './qa.js';
+import { guardScrapeTargets } from './ssrfGuard.js';
 
 const app = express();
 
@@ -26,6 +27,11 @@ if (process.env.ALLOWED_ORIGINS) {
 }
 
 app.use(express.json());
+
+// Refuse scan targets that resolve inside our own network. Mounted on the
+// whole prefix rather than per-handler so a new /scrape endpoint is
+// protected by default rather than by remembering.
+app.use('/scrape', guardScrapeTargets);
 
 const OUTPUT_ROOT = path.resolve(process.cwd(), process.env.OUTPUT_DIR ?? 'output');
 
