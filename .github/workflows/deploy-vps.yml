@@ -1,0 +1,166 @@
+# VPS deployment — runs ALONGSIDE the Fly.io pipeline in deploy.yml.
+# Neither workflow touches the other.
+#
+#   push to dev  -> staging  https://staging-deepscrape.ac0rn.io  (basic-auth)
+#   push to main -> prod     https://deepscrape.ac0rn.io          (basic-auth)
+#   coherence-<env> reaches deepscrape-<env>:5700 directly on the docker network.
+#
+# Roll back / roll forward (Actions -> "Deploy (VPS)" -> Run workflow):
+#   environment: staging|prod
+#   ref:         any commit SHA / tag / branch to deploy.  If that commit's
+#                image already exists in GHCR it is re-used (no rebuild), so
+#                rolling back to a previously deployed commit takes ~30s.
+#                The literal word "previous" swaps back to the image that was
+#                running before the last deploy, without touching git at all.
+#
+# Every deploy is recorded as a GitHub Deployment on the `staging` / `prod`
+# environment (repo -> Deployments), so the history of what ran where is
+# visible in GitHub, and `gh workflow run deploy-vps.yml -f environment=prod
+# -f ref=<sha>` drives it from the CLI.
+#
+# Repo secrets required:
+#   DEPLOY_HOST         VPS address
+#   DEPLOY_KNOWN_HOSTS  ssh-keyscan output for the host
+#   DEPLOY_SSH_KEY      private half of the command-restricted deploy key
+#
+# The deploy key can ONLY run `deploy <project> <env> <image|rollback>`
+# server-side; it cannot open a shell even if this secret leaks.
+
+name: Deploy (VPS)
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, prod]
+        required: true
+      ref:
+        description: "Commit SHA / tag / branch to deploy, or 'previous' to roll back one step. Empty = the branch you run this from."
+        required: false
+        default: ""
+
+env:
+  PROJECT: deepscrape
+  IMAGE_REPO: ghcr.io/haigis/deepscrape
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.t.outputs.env }}
+      url: ${{ steps.t.outputs.url }}
+      ref: ${{ steps.t.outputs.ref }}
+      rollback: ${{ steps.t.outputs.rollback }}
+    steps:
+      - id: t
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+            REF="${{ inputs.ref }}"
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            ENV=prod; REF="$GITHUB_SHA"
+          else
+            ENV=staging; REF="$GITHUB_SHA"
+          fi
+          [ -n "$REF" ] || REF="$GITHUB_SHA"
+          if [ "$ENV" = "prod" ]; then URL="https://deepscrape.ac0rn.io/"; else URL="https://staging-deepscrape.ac0rn.io/"; fi
+          ROLLBACK=false; [ "$REF" = "previous" ] && ROLLBACK=true
+          {
+            echo "env=$ENV"; echo "url=$URL"; echo "ref=$REF"; echo "rollback=$ROLLBACK"
+          } >> "$GITHUB_OUTPUT"
+          echo "target: $ENV  ref: $REF  rollback: $ROLLBACK"
+
+  deploy:
+    needs: resolve
+    runs-on: ubuntu-latest
+    # One deploy at a time per environment; queued, never cancelled.
+    concurrency:
+      group: deploy-vps-${{ needs.resolve.outputs.env }}
+      cancel-in-progress: false
+    environment:
+      name: ${{ needs.resolve.outputs.env }}
+      url: ${{ needs.resolve.outputs.url }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.resolve.outputs.rollback == 'false'
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - name: Resolve image tag
+        id: img
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.resolve.outputs.rollback }}" = "true" ]; then
+            echo "image=rollback" >> "$GITHUB_OUTPUT"
+            echo "rolling back to the previously running image"
+            exit 0
+          fi
+          SHA="$(git rev-parse HEAD)"
+          echo "image=${IMAGE_REPO}:${SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "image: ${IMAGE_REPO}:${SHA::12}"
+
+      - uses: docker/login-action@v3
+        if: needs.resolve.outputs.rollback == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-use an already-built image for this commit (roll back / forward).
+      - name: Check GHCR for an existing image
+        id: exists
+        if: needs.resolve.outputs.rollback == 'false'
+        run: |
+          if docker manifest inspect "${{ steps.img.outputs.image }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "image already in GHCR — skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "image not in GHCR — building"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
+
+      - name: Build and push
+        if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.img.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.img.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to VPS
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/dk
+          chmod 600 ~/.ssh/dk
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/dk -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            ubuntu@${{ secrets.DEPLOY_HOST }} \
+            "deploy ${PROJECT} ${{ needs.resolve.outputs.env }} ${{ steps.img.outputs.image }}"
+
+      - name: Smoke test
+        run: |
+          URL="${{ needs.resolve.outputs.url }}"
+          for i in $(seq 1 15); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$URL" || true)
+            echo "attempt $i: HTTP $CODE"
+            # 401 = Caddy basic-auth answered, which means the upstream is wired.
+            case "$CODE" in 2*|3*|401) echo "smoke test passed"; exit 0 ;; esac
+            sleep 10
+          done
+          echo "smoke test FAILED — server already rolled back if the container was unhealthy; check deploy output above" >&2
+          exit 1
