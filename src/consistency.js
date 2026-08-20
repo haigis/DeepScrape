@@ -214,6 +214,10 @@ function checkFacts(pages) {
             id: check.id,
             category: 'facts',
             severity: groups.size > 3 ? 'high' : 'medium',
+            // Same-format values in the same role: a strong heuristic, not a
+            // confirmed contradiction — branches and departments legitimately
+            // differ (rating.v3 confidence tiers).
+            confidence: 'strong',
             title: `${groups.size} different ${check.label} across the site`,
             detail: `The site states ${groups.size} distinct ${check.label}. Where these are not clearly scoped to different teams or locations, they read as contradictions.`,
             why: check.why,
@@ -230,6 +234,8 @@ function checkFacts(pages) {
             id: 'price-spread',
             category: 'facts',
             severity: 'low',
+            // Different products carry different prices — fuzzy by nature.
+            confidence: 'weak',
             title: `${spread.length} distinct prices quoted across the site`,
             detail: 'Prices appear in multiple places. Check that the same product is not quoted at different prices on different pages.',
             why: 'Conflicting prices for one product are a direct factual contradiction; assistants may quote a stale figure.',
@@ -474,6 +480,8 @@ async function checkTerminology(pages, scanPath) {
             id: 'anchor-terminology-drift',
             category: 'terminology',
             severity: drift.length > 10 ? 'medium' : 'low',
+            // Terminology-style fuzzy matching (rating.v3 confidence tiers).
+            confidence: 'weak',
             title: `${drift.length} pages are referred to by three or more different names`,
             detail: 'Internal links point at the same page using inconsistent wording.',
             why: 'Anchor text is one of the strongest signals of what a page is called. Several competing names for one page split the evidence and blur the entity.',
@@ -675,47 +683,47 @@ export async function buildConsistencyReport(scanPath, scan) {
         ...await checkTerminology(pages, scanPath),
     ];
 
-    // rating.v2: pillar scores, size normalisation, per-finding point
-    // attribution. The old flat penalty is gone — see src/rating.js.
-    const rating = rateFindings(findings, pages.length);
-    const score = rating.score;
-
-    // rating.v3 (shadow): the v2 findings plus the access and
-    // extractability analyzers, scored with reach × confidence under
-    // six pillars. Shown score stays v2 until v3 is calibrated
-    // (docs/scoring-methodology-v3.md in the coherence repo). The new
-    // findings ship in a separate array so consumers persisting the v2
-    // category set are unaffected.
+    // rating.v3 is the default (issue #39, calibrated 2026-08-20): six
+    // pillars over all findings including the access and extractability
+    // analyzers, cost = severityBase × reach × confidence. Historical
+    // scans keep the methodology version they were scored under —
+    // scores are never rewritten.
     const domain = scan.split('/')[0];
     const { findings: accessFindings, metrics: accessMetrics } =
         await analyzeAccess(scanPath, domain).catch(() => ({ findings: [], metrics: null }));
     const extractabilityFindings = checkExtractability(pages);
-    const v3Findings = [...accessFindings, ...extractabilityFindings];
-    const ratingV3 = rateFindingsV3([...findings, ...v3Findings], pages.length);
+    const allFindings = [...findings, ...accessFindings, ...extractabilityFindings];
+
+    const rating = rateFindingsV3(allFindings, pages.length);
+    const score = rating.score;
+    // Legacy four-pillar rating, kept in the report for comparison
+    // during the transition; not the shown score.
+    const ratingV2 = rateFindings(findings, pages.length);
 
     const summary = { high: 0, medium: 0, low: 0 };
-    for (const finding of findings) summary[finding.severity]++;
+    for (const finding of allFindings) summary[finding.severity]++;
 
     const order = { high: 0, medium: 1, low: 2 };
-    findings.sort((a, b) => order[a.severity] - order[b.severity] || b.pagesAffected - a.pagesAffected);
-    v3Findings.sort((a, b) => order[a.severity] - order[b.severity] || b.pagesAffected - a.pagesAffected);
+    allFindings.sort((a, b) => order[a.severity] - order[b.severity] || b.pagesAffected - a.pagesAffected);
 
+    const countBy = category => allFindings.filter(f => f.category === category).length;
     return {
         scan,
         pages: pages.length,
         score,
         rating,
-        ratingV3,
-        v3Findings,
+        ratingV2,
         accessMetrics,
         summary,
         byCategory: {
-            facts: findings.filter(f => f.category === 'facts').length,
-            metadata: findings.filter(f => f.category === 'metadata').length,
-            'structured-data': findings.filter(f => f.category === 'structured-data').length,
-            terminology: findings.filter(f => f.category === 'terminology').length,
+            access: countBy('access'),
+            facts: countBy('facts'),
+            metadata: countBy('metadata'),
+            'structured-data': countBy('structured-data'),
+            terminology: countBy('terminology'),
+            extractability: countBy('extractability'),
         },
-        findings,
+        findings: allFindings,
     };
 }
 

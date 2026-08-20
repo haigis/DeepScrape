@@ -24,13 +24,14 @@ describe('rating v3 formula', () => {
         const rating = rateFindingsV3([], 50);
         expect(rating.score).toBe(100);
         expect(rating.grade).toBe('A');
-        expect(rating.methodologyVersion).toBe('rating.v3-shadow');
+        expect(rating.methodologyVersion).toBe('rating.v3');
     });
 
-    it('reach floors at 0.25 and saturates at ~10% of the site', () => {
-        expect(reachFactor(1, 10000)).toBeCloseTo(0.25, 1);
+    it('reach floors at 0.35 and saturates at ~10% of the site', () => {
+        expect(reachFactor(1, 10000)).toBeCloseTo(0.35, 1);
         expect(reachFactor(1000, 10000)).toBe(1);
         expect(reachFactor(5, 50)).toBe(1); // max(5, 0.1×50)=5 pages saturates
+        expect(reachFactor(1, 1)).toBe(1); // saturation never exceeds the site
     });
 
     it('confidence discounts heuristic findings', () => {

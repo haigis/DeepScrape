@@ -57,11 +57,14 @@ export const gradeOf = (score) =>
  *   verdict: string,
  * }}
  */
-// --- Rating v3 (shadow) ----------------------------------------------------
-// Six pillars; cost = severityBase × reach × confidence. Runs alongside
-// v2 while calibrating (docs/scoring-methodology-v3.md in coherence).
+// --- Rating v3 -------------------------------------------------------------
+// Six pillars; cost = severityBase × reach × confidence. Calibrated
+// 2026-08-20 against real scans (nationwide, barclays, nohesi.gg,
+// example.com) so grades track the v2 distribution human intuition was
+// validated on: severity bases match v2, confidence discounts 0.7/0.4,
+// reach floor 0.35 (docs/scoring-methodology-v3.md in coherence).
 
-export const METHODOLOGY_VERSION_V3 = 'rating.v3-shadow';
+export const METHODOLOGY_VERSION_V3 = 'rating.v3';
 
 export const PILLARS_V3 = Object.freeze({
     access: { label: 'Access & rendering', weight: 0.15 },
@@ -72,18 +75,19 @@ export const PILLARS_V3 = Object.freeze({
     extractability: { label: 'Extractability', weight: 0.15 },
 });
 
-const SEVERITY_BASE_V3 = { high: 15, medium: 8, low: 3 };
-const CONFIDENCE_V3 = { confirmed: 1.0, strong: 0.6, weak: 0.3 };
+const SEVERITY_BASE_V3 = { high: 45, medium: 22, low: 8 };
+const CONFIDENCE_V3 = { confirmed: 1.0, strong: 0.7, weak: 0.4 };
 
 /**
  * Reach: share of the site a finding touches, floored so big sites
  * cannot dilute a real contradiction to nothing, saturating once ~10%
- * of the site (or 5 pages) is affected.
+ * of the site (or 5 pages) is affected. Saturation never exceeds the
+ * site itself, so a sitewide finding on a tiny site still reaches 1.
  */
 export function reachFactor(pagesAffected, totalPages) {
     if (!totalPages) return 1;
-    const saturation = Math.max(5, 0.1 * totalPages);
-    return 0.25 + 0.75 * Math.min(1, (pagesAffected || 1) / saturation);
+    const saturation = Math.min(totalPages, Math.max(5, 0.1 * totalPages));
+    return 0.35 + 0.65 * Math.min(1, (pagesAffected || 1) / saturation);
 }
 
 /**
