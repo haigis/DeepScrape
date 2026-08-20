@@ -142,21 +142,66 @@ async function downloadPageImages(page, pageUrl, imgDir) {
  */
 
 /**
+ * Hard ceiling on one page's total processing time. Individual steps
+ * carry their own timeouts (navigation 30s, CDP protocol 180s, asset
+ * downloads 20s), but their sum was unbounded — one pathological page
+ * could wedge a crawl worker for hours and make cancellation
+ * unreachable. The deadline puts a roof over the whole thing.
+ */
+const pageDeadlineMs = () => Math.max(30000, Number(process.env.DS_PAGE_TIMEOUT_MS) || 120000);
+
+/**
  * Scrapes a given webpage and stores HTML, screenshot and images
  * while maintaining URL structure.
+ *
+ * The whole operation races a per-page deadline and the caller's abort
+ * signal, so a hung page costs at most pageDeadlineMs and a cancelled
+ * job stops mid-page rather than after it.
+ *
  * @param {object} browser - Puppeteer browser instance.
  * @param {string} url - The URL to scrape.
  * @param {string} outDir - Base directory for output.
- * @param {ScrapeOptions} options - Scrape options.
+ * @param {ScrapeOptions & {signal?: AbortSignal}} options - Scrape options.
  * @returns {Promise<ScrapeResult>}
  */
 export async function scrapePage(browser, url, outDir, options = {}) {
-    const { screenshot, downloadImages, offline, cookieDismissal } = resolveOptions(options);
-    console.log(`🌍 Navigating: ${url}`);
+    const { signal } = options;
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900 });
+
+    let timer;
+    let onAbort;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error(`page deadline exceeded (${pageDeadlineMs()}ms)`)),
+            pageDeadlineMs(),
+        );
+        if (signal) {
+            onAbort = () => reject(new Error('cancelled'));
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+    });
 
     try {
+        return await Promise.race([scrapePageInner(page, url, outDir, options), deadline]);
+    } catch (err) {
+        console.error(`❌ Error processing ${url}:`, err.message);
+        return { ok: false, links: [], error: err.message };
+    } finally {
+        clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+        // Closing a wedged page can itself hang — never wait on it for
+        // more than a moment; a leaked tab dies with the shared browser.
+        await Promise.race([page.close().catch(() => {}), waitMs(5000)]);
+    }
+}
+
+async function scrapePageInner(page, url, outDir, options = {}) {
+    const { screenshot, downloadImages, offline, cookieDismissal } = resolveOptions(options);
+    console.log(`🌍 Navigating: ${url}`);
+    await page.setViewport({ width: 1440, height: 900 });
+
+    {
         // When the scan wants neither screenshots nor images, the pixels
         // can't matter — skip image/media/font downloads for a much
         // faster page load. Never active on screenshot scans (the
@@ -246,11 +291,6 @@ export async function scrapePage(browser, url, outDir, options = {}) {
         }
 
         return { ok: true, status, links };
-    } catch (err) {
-        console.error(`❌ Error processing ${url}:`, err.message);
-        return { ok: false, links: [], error: err.message };
-    } finally {
-        await page.close();
     }
 }
 
@@ -263,10 +303,13 @@ async function autoScroll(page) {
         return new Promise((resolve) => {
             let totalHeight = 0;
             const distance = 100;
+            // Bounded: an infinite-scroll feed grows scrollHeight faster
+            // than we scroll, and the unbounded version never resolved.
+            const maxHeight = 60000;
             const timer = setInterval(() => {
                 window.scrollBy(0, distance);
                 totalHeight += distance;
-                if (totalHeight >= document.body.scrollHeight) {
+                if (totalHeight >= document.body.scrollHeight || totalHeight >= maxHeight) {
                     clearInterval(timer);
                     resolve();
                 }
@@ -325,7 +368,7 @@ export async function processUrls(urls, options = {}) {
         onProgress?.({ done: processed + failed, total: urls.length, currentUrl: url });
         try {
             const outDir = generateOutputDir(url);
-            const result = await scrapePage(browser, url, outDir, opts);
+            const result = await scrapePage(browser, url, outDir, { ...opts, signal });
             result.ok ? processed++ : failed++;
         } catch (err) {
             failed++;

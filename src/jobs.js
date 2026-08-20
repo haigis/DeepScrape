@@ -23,6 +23,14 @@ import { closeBrowser } from './scraper.js';
 /** Max concurrent non-priority jobs. Read per-call so tests can pin it. */
 const maxConcurrent = () => Math.max(1, parseInt(process.env.MAX_CONCURRENT_JOBS ?? '3', 10) || 1);
 
+/**
+ * Watchdog: no job may run longer than this, whatever it is doing.
+ * Per-page deadlines make a hung page cost minutes, not hours, but the
+ * ceiling is what guarantees the queue always drains. 0 disables.
+ */
+const jobTimeoutMs = () =>
+    Math.max(0, parseInt(process.env.DS_JOB_TIMEOUT_MINUTES ?? '240', 10) || 0) * 60_000;
+
 const jobs = new Map();
 /** @type {{job: Job, runner: Function}[]} */
 const queue = [];
@@ -144,26 +152,46 @@ async function runJob(job, runner, isPriority) {
     job.startedAt = new Date().toISOString();
     console.log(`▶️ Job ${job.id} (${job.type}) started${isPriority ? ' (priority)' : ''} [${runningCount} running]`);
 
+    let timedOut = false;
+    const watchdogMs = jobTimeoutMs();
+    const watchdog = watchdogMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            console.error(`⏱ Job ${job.id} exceeded ${watchdogMs / 60000} minutes — aborting.`);
+            abort.abort();
+        }, watchdogMs)
+        : null;
+
+    const settle = () => {
+        if (timedOut) {
+            job.status = 'failed';
+            job.error = `job timed out after ${watchdogMs / 60000} minutes`;
+            console.error(`❌ Job ${job.id} failed: ${job.error}`);
+        } else if (abort.signal.aborted) {
+            job.status = 'cancelled';
+            console.log(`⏹ Job ${job.id} stopped by user`);
+        }
+    };
+
     try {
         const gate = isPriority ? null : pauseGate;
         job.result = await runner(progress => { job.progress = progress; }, job.params, abort.signal, gate);
         if (abort.signal.aborted) {
-            job.status = 'cancelled';
-            console.log(`⏹ Job ${job.id} stopped by user`);
+            settle();
         } else {
             job.status = 'completed';
             console.log(`✅ Job ${job.id} completed`);
         }
     } catch (err) {
         if (abort.signal.aborted) {
-            job.status = 'cancelled';
-            console.log(`⏹ Job ${job.id} stopped by user`);
+            settle();
         } else {
             job.status = 'failed';
             job.error = err.message;
             console.error(`❌ Job ${job.id} failed: ${err.message}`);
         }
     } finally {
+        if (watchdog) clearTimeout(watchdog);
         job.finishedAt = new Date().toISOString();
         aborts.delete(job.id);
 

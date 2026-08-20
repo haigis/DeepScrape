@@ -55,6 +55,17 @@ const isImageUrl = (url) => {
 };
 
 /**
+ * Documents and binaries a browser cannot render as a page. Navigating
+ * Chrome at a PDF can wedge a worker for hours (a prod crawl hung on
+ * one), so these never enter the queue; the content-type check on the
+ * response stays as the safety net for extensionless binary URLs.
+ */
+const isBinaryUrl = (url) =>
+    /\.(pdf|zip|gz|tgz|tar|rar|7z|doc|docx|xls|xlsx|ppt|pptx|odt|ods|csv|mp3|mp4|m4a|m4v|avi|mov|wmv|webm|mkv|flv|ogg|wav|exe|dmg|msi|apk|iso|woff2?|ttf|eot)(\?|#|$)/i.test(url);
+
+const isUncrawlable = (url) => isImageUrl(url) || isBinaryUrl(url);
+
+/**
  * Query parameters that never change the page served — analytics and
  * click-tracking noise. Kept conservative: anything not listed here is
  * assumed to be meaningful (?page=2, ?q=…).
@@ -208,7 +219,7 @@ export async function spiderCrawl(startUrls, options = {}) {
                 continue;
             }
             const { url, depth } = entry;
-            if (visited.has(url) || isImageUrl(url)) continue;
+            if (visited.has(url) || isUncrawlable(url)) continue;
             // A live exclude may have arrived after this URL was queued.
             if (dynamicallyExcluded(url)) {
                 excludedLive.push(url);
@@ -222,7 +233,7 @@ export async function spiderCrawl(startUrls, options = {}) {
             inFlight++;
             let result;
             try {
-                result = await scrapePage(browser, url, outDir, { ...opts, dedupe: contentHashes });
+                result = await scrapePage(browser, url, outDir, { ...opts, dedupe: contentHashes, signal });
             } finally {
                 inFlight--;
             }
@@ -265,7 +276,7 @@ export async function spiderCrawl(startUrls, options = {}) {
                 }
                 if (sources && sources.size < MAX_SOURCES_PER_LINK) sources.add(url);
 
-                if (isImageUrl(link) || queued.has(link)) continue;
+                if (isUncrawlable(link) || queued.has(link)) continue;
 
                 if (new URL(link).hostname === domain && inScope(link) && depth < maxDepth) {
                     queued.add(link);

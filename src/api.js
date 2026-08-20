@@ -648,6 +648,20 @@ app.get('/scan/consistency', async (req, res) => {
   }
 });
 
+// A stray rejection in one page's processing must not take down every
+// running job with it. Log it and keep serving; the per-page deadline
+// and job watchdog bound whatever misbehaved.
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled rejection (continuing):', reason instanceof Error ? reason.stack : reason);
+});
+
+// A synchronous crash leaves unknowable state — exit and let the
+// container restart clean. Callers detect the dead jobs and re-run.
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught exception — exiting for a clean restart:', err.stack);
+  process.exit(1);
+});
+
 app.listen(PORT, HOST, () =>
   console.log(`🚀 API running at http://${HOST}:${PORT}`)
 );
