@@ -99,22 +99,18 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/login-action@v3
-        if: needs.resolve.outputs.rollback == 'false'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Re-use an already-built image for this commit (roll back / forward).
       - name: Check GHCR for an existing image
         id: exists
         if: needs.resolve.outputs.rollback == 'false'
         run: |
-          if docker manifest inspect "${{ needs.resolve.outputs.image }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "image already in GHCR — skipping build"
+          # The runner and the deploy host are the same machine, so the
+          # local image store is the registry now (GHCR writes are
+          # blocked while billing is exhausted, and add nothing here).
+          if docker image inspect "${{ needs.resolve.outputs.image }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "image already built locally — skipping build"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "image not in GHCR — building"
+            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "image not present — building"
           fi
 
       - uses: actions/checkout@v4
@@ -127,7 +123,7 @@ jobs:
         with:
           # Persistent builder on the VPS runner: its container carries the
           # layer cache between runs, replacing the gha cache backend.
-          name: vps-builder
+          name: vps-builder-deepscrape
 
       - name: Build and push
         if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
@@ -144,9 +140,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
 
-      - name: Push image
-        if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
-        run: docker push "${{ needs.resolve.outputs.image }}"
 
       - name: Deploy to VPS
         run: |
