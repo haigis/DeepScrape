@@ -49,7 +49,7 @@ env:
 
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps]
     outputs:
       env: ${{ steps.t.outputs.env }}
       url: ${{ steps.t.outputs.url }}
@@ -87,7 +87,7 @@ jobs:
 
   deploy:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps]
     # One deploy at a time per environment; queued, never cancelled.
     concurrency:
       group: deploy-vps-${{ needs.resolve.outputs.env }}
