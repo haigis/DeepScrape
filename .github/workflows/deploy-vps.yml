@@ -124,19 +124,29 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
         if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
+        with:
+          # Persistent builder on the VPS runner: its container carries the
+          # layer cache between runs, replacing the gha cache backend.
+          name: vps-builder
 
       - name: Build and push
         if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # Load into the local daemon and push with the docker CLI below:
+          # buildkit's own pusher fails to fetch a ghcr token on the
+          # self-hosted runner, while the daemon's login works.
+          push: false
+          load: true
           tags: ${{ needs.resolve.outputs.image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+
+      - name: Push image
+        if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
+        run: docker push "${{ needs.resolve.outputs.image }}"
 
       - name: Deploy to VPS
         run: |

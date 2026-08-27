@@ -1,14 +1,14 @@
 # DeepScrape API — Node 22 + Chromium for Puppeteer.
 FROM node:22-slim
 
-# Chromium runtime dependencies.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 \
-    libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 \
-    libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
-    libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
-    libxrandr2 xdg-utils wget \
-    && rm -rf /var/lib/apt/lists/*
+# Debian's chromium instead of Puppeteer's Chrome-for-Testing download:
+# the build host's IP range gets 403s from Google's CDN, and an apt
+# package is one less external download to break anywhere.
+RUN apt-get update && apt-get install -y --no-install-recommends     chromium ca-certificates fonts-liberation wget     && rm -rf /var/lib/apt/lists/*
+
+# Puppeteer drives the system chromium; never download a browser.
+ENV PUPPETEER_SKIP_DOWNLOAD=1
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
@@ -26,8 +26,7 @@ RUN groupadd --system --gid 1001 scanner     && useradd --system --uid 1001 --gi
 USER scanner
 
 COPY --chown=scanner:scanner package*.json ./
-# postinstall (if any) plus explicit browser download into the image.
-RUN npm ci && npx puppeteer browsers install chrome
+RUN npm ci
 
 COPY --chown=scanner:scanner . .
 
