@@ -1,5 +1,4 @@
-# VPS deployment — runs ALONGSIDE the Fly.io pipeline in deploy.yml.
-# Neither workflow touches the other.
+# VPS deployment via Forgejo Actions (https://git.ac0rn.io).
 #
 #   push to dev  -> staging  https://staging-deepscrape.ac0rn.io  (basic-auth)
 #   push to main -> prod     https://deepscrape.ac0rn.io          (basic-auth)
@@ -8,15 +7,17 @@
 # Roll back / roll forward (Actions -> "Deploy (VPS)" -> Run workflow):
 #   environment: staging|prod
 #   ref:         any commit SHA / tag / branch to deploy.  If that commit's
-#                image already exists in GHCR it is re-used (no rebuild), so
-#                rolling back to a previously deployed commit takes ~30s.
-#                The literal word "previous" swaps back to the image that was
-#                running before the last deploy, without touching git at all.
+#                image already exists in the VPS's local docker store it is
+#                re-used (no rebuild), so rolling back to a previously
+#                deployed commit takes ~30s.  The literal word "previous"
+#                swaps back to the image that was running before the last
+#                deploy, without touching git at all.
 #
-# Every deploy is recorded as a GitHub Deployment on the `staging` / `prod`
-# environment (repo -> Deployments), so the history of what ran where is
-# visible in GitHub, and `gh workflow run deploy-vps.yml -f environment=prod
-# -f ref=<sha>` drives it from the CLI.
+# From the CLI (token in /opt/stacks/git/.secrets on the VPS):
+#   curl -X POST -H "Authorization: token $FJ_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     -d '{"ref":"dev","inputs":{"environment":"staging","ref":"<sha|previous>"}}' \
+#     https://git.ac0rn.io/api/v1/repos/mark/DeepScrape/actions/workflows/deploy-vps.yml/dispatches
 #
 # Repo secrets required:
 #   DEPLOY_HOST         VPS address
@@ -45,7 +46,7 @@ on:
 
 env:
   PROJECT: deepscrape
-  IMAGE_REPO: ghcr.io/haigis/deepscrape
+  IMAGE_REPO: git.ac0rn.io/mark/deepscrape
 
 jobs:
   resolve:
@@ -58,8 +59,6 @@ jobs:
       rollback: ${{ steps.t.outputs.rollback }}
     steps:
       - id: t
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -76,8 +75,11 @@ jobs:
           if [ "$REF" = "previous" ]; then
             ROLLBACK=true
           else
-            # Accept a branch, tag, or short/full SHA; pin to the full SHA.
-            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)"
+            # Accept a branch, tag, or short/full SHA; pin to the full SHA
+            # via the Forgejo API.
+            SHA="$(curl -sfG -H "Authorization: token ${{ github.token }}" \
+              --data-urlencode "sha=$REF" --data-urlencode "limit=1" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits" | jq -re '.[0].sha')"
             IMAGE="${IMAGE_REPO}:${SHA::12}"
           fi
           {
@@ -92,21 +94,14 @@ jobs:
     concurrency:
       group: deploy-vps-${{ needs.resolve.outputs.env }}
       cancel-in-progress: false
-    environment:
-      name: ${{ needs.resolve.outputs.env }}
-      url: ${{ needs.resolve.outputs.url }}
-    permissions:
-      contents: read
-      packages: write
     steps:
       # Re-use an already-built image for this commit (roll back / forward).
-      - name: Check GHCR for an existing image
+      # The runner and the deploy host are the same machine, so the local
+      # image store is the registry.
+      - name: Check for an existing image
         id: exists
         if: needs.resolve.outputs.rollback == 'false'
         run: |
-          # The runner and the deploy host are the same machine, so the
-          # local image store is the registry now (GHCR writes are
-          # blocked while billing is exhausted, and add nothing here).
           if docker image inspect "${{ needs.resolve.outputs.image }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"; echo "image already built locally — skipping build"
           else
@@ -125,21 +120,17 @@ jobs:
           # layer cache between runs, replacing the gha cache backend.
           name: vps-builder-deepscrape
 
-      - name: Build and push
+      - name: Build (into the local image store)
         if: needs.resolve.outputs.rollback == 'false' && steps.exists.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
-          # Load into the local daemon and push with the docker CLI below:
-          # buildkit's own pusher fails to fetch a ghcr token on the
-          # self-hosted runner, while the daemon's login works.
           push: false
           load: true
           tags: ${{ needs.resolve.outputs.image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
-
 
       - name: Deploy to VPS
         run: |
