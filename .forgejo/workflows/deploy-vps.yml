@@ -138,9 +138,11 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/dk
           chmod 600 ~/.ssh/dk
           printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          ssh -i ~/.ssh/dk -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            ubuntu@${{ secrets.DEPLOY_HOST }} \
-            "deploy ${PROJECT} ${{ needs.resolve.outputs.env }} ${{ needs.resolve.outputs.image }}"
+          # Single line, command in one variable: forgejo-runner mangled the
+          # backslash-continued form and ssh arrived with no remote command.
+          CMD="deploy ${PROJECT} ${{ needs.resolve.outputs.env }} ${{ needs.resolve.outputs.image }}"
+          echo "sending: $CMD"
+          ssh -i ~/.ssh/dk -o BatchMode=yes -o StrictHostKeyChecking=yes "ubuntu@${{ secrets.DEPLOY_HOST }}" "$CMD"
 
       - name: Smoke test
         run: |
