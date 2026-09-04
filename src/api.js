@@ -2,13 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { processUrls } from './scraper.js';
+import { processUrls, browserStats } from './scraper.js';
 import { fetchSitemapUrls, discoverSitemaps } from './sitemap.js';
 import { spiderCrawl, makeScope } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
-import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob } from './jobs.js';
+import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob, resumeInterrupted, queueStats } from './jobs.js';
 import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './scanStore.js';
-import { getConsistencyReport } from './consistency.js';
+import { getConsistencyReport, peekConsistencyReport } from './consistency.js';
 import { buildDashboard, buildPageAttributes } from './analytics.js';
 import { extractScanQa } from './qa.js';
 import { guardScrapeTargets } from './ssrfGuard.js';
@@ -70,7 +70,23 @@ const paramsToOptions = (params) => ({
   offline: params.offline === undefined ? true : parseBoolean(params.offline),
   // Cookie-banner dismissal (screenshot-only concern); default on.
   cookieDismissal: params.cookieDismissal === undefined ? true : parseBoolean(params.cookieDismissal),
+  // Carry on from the crawl checkpoint in the scan folder, if there is one.
+  resume: parseBoolean(params.resume),
+  // Pins the scan folder's date (set at job creation; see scanDateOf).
+  scanDate: typeof params.scanDate === 'string' ? params.scanDate : undefined,
 });
+
+/**
+ * The date folder a scan writes into. Defaults to today; a caller may
+ * pin one (YYYY-MM-DD only — validated in the crawler too) so a scan
+ * retried after midnight, or resumed, lands in the folder it started
+ * in and the caller's "domain/date" scan id stays true.
+ */
+const scanDateOf = (value) =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Date().toISOString().slice(0, 10);
+
+/** "domain/date" — the id the caller uses for every /scan/* query. */
+const scanIdOf = (url, scanDate) => `${new URL(url).hostname}/${scanDate}`;
 
 /**
  * Resolves a user-supplied scan identifier ("domain/date") to a path
@@ -185,19 +201,70 @@ const registerLiveCrawl = (jobId, live) => {
   }
 };
 
+/**
+ * Runners for the two crawl job types, as factories: a job record that
+ * survives a scanner restart is re-queued under its own id with a fresh
+ * runner built from its saved params (see resumeInterrupted below), and
+ * the crawl carries on from its checkpoint.
+ */
+const spiderRunner = (live) => (onProgress, params, signal, gate) =>
+  spiderCrawl([params.url], { ...paramsToOptions(params), live, onProgress, signal, gate });
+
+const fullRunner = (live) => async (onProgress, params, signal, gate) => {
+  const origin = new URL(params.url).origin;
+  const host = new URL(params.url).hostname;
+
+  onProgress({ done: 0, total: null, currentUrl: 'discovering sitemaps…' });
+  const sitemaps = await discoverSitemaps(origin);
+
+  let sitemapUrls = [];
+  for (const [i, sitemap] of sitemaps.entries()) {
+    if (signal?.aborted) break;
+    // Each sitemap is a progress tick: a large index can take minutes
+    // to read, and silence that long would read as a stall.
+    onProgress({ done: 0, total: null, currentUrl: `reading sitemap ${i + 1}/${sitemaps.length}: ${sitemap}` });
+    try {
+      sitemapUrls.push(...await fetchSitemapUrls(sitemap));
+    } catch (err) {
+      console.warn(`⚠️ Sitemap ${sitemap} failed: ${err.message}`);
+    }
+  }
+
+  // Same host only; honour include/exclude scope if given.
+  const inScope = makeScope(paramsToOptions(params));
+  sitemapUrls = [...new Set(sitemapUrls)].filter(u => {
+    try {
+      return new URL(u).hostname === host && inScope(u);
+    } catch {
+      return false;
+    }
+  });
+
+  console.log(`🌐 Full discovery: ${sitemaps.length} sitemap(s), ${sitemapUrls.length} URLs seeded + spider from ${params.url}`);
+
+  const summary = await spiderCrawl(
+    [params.url, ...sitemapUrls],
+    { ...paramsToOptions(params), live, onProgress, signal, gate },
+  );
+  return { ...summary, sitemaps, sitemapSeeded: sitemapUrls.length };
+};
+
+const RESUMABLE_RUNNERS = { spider: spiderRunner, full: fullRunner };
+
 app.post('/scrape/spider', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, resume, scanDate } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const live = { dynamicExcludes: [] };
-  const job = createJob(
-    'spider',
-    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
-    (onProgress, params, signal, gate) =>
-      spiderCrawl([params.url], { ...paramsToOptions(params), live, onProgress, signal, gate }));
+  const params = {
+    url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal,
+    screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages),
+    resume: parseBoolean(resume), scanDate: scanDateOf(scanDate),
+  };
+  const job = createJob('spider', params, spiderRunner(live));
   registerLiveCrawl(job.id, live);
 
-  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, scan: scanIdOf(url, params.scanDate) });
 });
 
 /**
@@ -207,52 +274,24 @@ app.post('/scrape/spider', (req, res) => {
  * URL plus the start page, and lets link-following catch anything the
  * sitemap doesn't list. Orphans (in the sitemap but never linked) and
  * unlisted pages (linked but not in the sitemap) are both captured.
+ *
+ * Optional: `resume: true` continues a crawl that died (from the
+ * checkpoint in the scan folder), `scanDate` pins the folder date.
  */
 app.post('/scrape/full', (req, res) => {
-  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal } = req.body;
+  const { url, maxDepth = 2, rateLimit = 1000, screenshot, downloadImages, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, resume, scanDate } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const live = { dynamicExcludes: [] };
-  const job = createJob(
-    'full',
-    { url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal, screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages) },
-    async (onProgress, params, signal, gate) => {
-      const origin = new URL(params.url).origin;
-      const host = new URL(params.url).hostname;
-
-      onProgress({ done: 0, total: null, currentUrl: 'discovering sitemaps…' });
-      const sitemaps = await discoverSitemaps(origin);
-
-      let sitemapUrls = [];
-      for (const sitemap of sitemaps) {
-        try {
-          sitemapUrls.push(...await fetchSitemapUrls(sitemap));
-        } catch (err) {
-          console.warn(`⚠️ Sitemap ${sitemap} failed: ${err.message}`);
-        }
-      }
-
-      // Same host only; honour include/exclude scope if given.
-      const inScope = makeScope(paramsToOptions(params));
-      sitemapUrls = [...new Set(sitemapUrls)].filter(u => {
-        try {
-          return new URL(u).hostname === host && inScope(u);
-        } catch {
-          return false;
-        }
-      });
-
-      console.log(`🌐 Full discovery: ${sitemaps.length} sitemap(s), ${sitemapUrls.length} URLs seeded + spider from ${params.url}`);
-
-      const summary = await spiderCrawl(
-        [params.url, ...sitemapUrls],
-        { ...paramsToOptions(params), live, onProgress, signal, gate },
-      );
-      return { ...summary, sitemaps, sitemapSeeded: sitemapUrls.length };
-    });
+  const params = {
+    url, rateLimit, maxDepth, pathPrefix, includePaths, excludePaths, maxPages, concurrency, cookieDismissal,
+    screenshot: parseBoolean(screenshot), downloadImages: parseBoolean(downloadImages),
+    resume: parseBoolean(resume), scanDate: scanDateOf(scanDate),
+  };
+  const job = createJob('full', params, fullRunner(live));
   registerLiveCrawl(job.id, live);
 
-  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}` });
+  res.status(202).json({ success: true, jobId: job.id, statusUrl: `/jobs/${job.id}`, scan: scanIdOf(url, params.scanDate) });
 });
 
 /**
@@ -626,9 +665,36 @@ app.get('/scan/qa', async (req, res) => {
 });
 
 /**
- * GET /scan/consistency?scan=<domain>/<date>
+ * Report builds in flight, one per scan folder. A 10k-page report takes
+ * minutes, and an HTTP request held open that long fails at whichever
+ * proxy or client timeout comes first. With ?wait=0 the caller instead
+ * gets the last report built for the scan (fresh:false if the folder
+ * has changed since) or 202 while the first one builds, and polls.
+ * Builds for one scan never overlap; at most one is queued behind a
+ * running one, always for the newest folder state seen.
+ */
+const reportBuilds = new Map();
+function ensureReportBuild(scanPath, scan, token) {
+  const current = reportBuilds.get(scanPath);
+  if (current) {
+    if (current.token !== token) current.next = token;
+    return;
+  }
+  const entry = { token, next: null };
+  reportBuilds.set(scanPath, entry);
+  getConsistencyReport(scanPath, scan, token)
+    .catch(err => console.error(`❌ Consistency report for ${scan} failed: ${err.message}`))
+    .finally(() => {
+      reportBuilds.delete(scanPath);
+      if (entry.next && entry.next !== token) ensureReportBuild(scanPath, scan, entry.next);
+    });
+}
+
+/**
+ * GET /scan/consistency?scan=<domain>/<date>[&wait=0]
  * Cross-page content consistency findings: contradictory facts,
  * metadata conflicts, structured data problems and terminology drift.
+ * Blocks until built by default; see ensureReportBuild for wait=0.
  */
 app.get('/scan/consistency', async (req, res) => {
   const scan = req.query.scan;
@@ -642,11 +708,50 @@ app.get('/scan/consistency', async (req, res) => {
 
   try {
     const token = await getScanToken(scanPath);
-    res.json(await getConsistencyReport(scanPath, scan, token));
+    if (req.query.wait !== '0') {
+      return res.json(await getConsistencyReport(scanPath, scan, token));
+    }
+    const last = peekConsistencyReport(scanPath);
+    if (last && last.token === token) return res.json({ ...last.report, fresh: true });
+    ensureReportBuild(scanPath, scan, token);
+    if (last) return res.json({ ...last.report, fresh: false });
+    res.status(202).json({ pending: true, scan });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * GET /health
+ * Liveness plus what an operator wants to know first: is the browser
+ * up, how many jobs are running, has it been recycling. Used by the
+ * container healthcheck and by Coherence before it starts a scan.
+ */
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptimeSeconds: Math.round(process.uptime()),
+    jobs: queueStats(),
+    browser: browserStats(),
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+  });
+});
+
+// Jobs that were live when the previous process stopped: crawls go back
+// on the queue under their own ids and pick up from their checkpoints;
+// anything else is failed with a reason the caller can show.
+{
+  const resumed = resumeInterrupted((job) => {
+    const make = RESUMABLE_RUNNERS[job.type];
+    if (!make || !job.params?.url) return null;
+    const live = { dynamicExcludes: [] };
+    registerLiveCrawl(job.id, live);
+    return { runner: make(live), params: { resume: true, scanDate: scanDateOf(job.params.scanDate) } };
+  });
+  if (resumed.resumed.length || resumed.failed.length) {
+    console.log(`🔁 After restart: ${resumed.resumed.length} crawl(s) re-queued, ${resumed.failed.length} job(s) failed`);
+  }
+}
 
 // A stray rejection in one page's processing must not take down every
 // running job with it. Log it and keep serving; the per-page deadline

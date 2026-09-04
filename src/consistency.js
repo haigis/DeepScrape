@@ -727,6 +727,17 @@ export async function buildConsistencyReport(scanPath, scan) {
     };
 }
 
+/**
+ * The most recent report built for a scan, with the token it was built
+ * for — the caller decides whether "slightly behind the folder" is good
+ * enough (it is, for provisional numbers mid-crawl).
+ * @returns {{token: string, report: object}|null}
+ */
+export function peekConsistencyReport(scanPath) {
+    const cached = reportCache.get(scanPath);
+    return cached ? { token: cached.token, report: cached.report } : null;
+}
+
 /** Cached wrapper keyed on the scan's file state. */
 export async function getConsistencyReport(scanPath, scan, token) {
     const cached = reportCache.get(scanPath);

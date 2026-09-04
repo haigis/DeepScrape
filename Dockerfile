@@ -33,4 +33,9 @@ COPY --chown=scanner:scanner . .
 # Scan output lives on a mounted volume in production.
 ENV OUTPUT_DIR=/data/output
 EXPOSE 5700
+# Liveness: a wedged process (or one that exited after an uncaught
+# exception) is restarted by the orchestrator, and its crawls resume
+# from their checkpoints on the next boot.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-5700}/health" || exit 1
 CMD ["npm", "run", "api"]

@@ -48,30 +48,165 @@ export function resolveOptions(options = {}) {
 // --- Shared browser -------------------------------------------------------
 // One Puppeteer instance reused across scrape runs/jobs. The job queue
 // closes it when the queue drains; the CLI closes it before exit.
+//
+// The browser is the one part of a crawl that fails without any page
+// failing. Chrome wedges under memory pressure on long crawls, and every
+// newPage() then times out — "Timed out after waiting 30000ms", which
+// used to escape the per-page guard and fail whole scans. So it is
+// treated as a replaceable resource:
+//  - opening a tab is bounded and counted; repeated failures recycle it
+//  - it is recycled anyway every DS_BROWSER_RECYCLE_PAGES pages, before
+//    a long crawl can grow it into that state
+//  - a recycle waits (briefly) for tabs in flight, so workers lose at
+//    most the page they are on, and the crawler retries that page.
 
 let sharedBrowser = null;
+/** In-progress launch, so concurrent workers share one. */
+let launching = null;
+/** In-progress recycle; getBrowser() waits on it. */
+let recycling = null;
+let activePages = 0;
+let pagesSinceLaunch = 0;
+let consecutiveFaults = 0;
+const stats = { launches: 0, recycles: 0, faults: 0 };
+
+/** Pages a browser serves before it is replaced with a fresh one. 0 = never. */
+const recycleAfterPages = () => Math.max(0, Number(process.env.DS_BROWSER_RECYCLE_PAGES ?? 500) || 0);
+/** How long newPage() may take before the browser is considered wedged. */
+const newPageTimeoutMs = () => Math.max(5000, Number(process.env.DS_NEW_PAGE_TIMEOUT_MS) || 20000);
+const FAULTS_BEFORE_RECYCLE = 2;
+/** Longest a recycle waits for in-flight tabs before killing them. */
+const RECYCLE_DRAIN_MS = 30000;
 
 /**
  * Returns the shared Puppeteer browser, launching it if needed.
  * @returns {Promise<object>}
  */
 export async function getBrowser() {
-    if (!sharedBrowser || !sharedBrowser.connected) {
-        sharedBrowser = await puppeteer.launch(BROWSER_LAUNCH_OPTIONS);
+    if (recycling) await recycling;
+    if (sharedBrowser?.connected) return sharedBrowser;
+    if (!launching) {
+        launching = (async () => {
+            const browser = await puppeteer.launch(BROWSER_LAUNCH_OPTIONS);
+            stats.launches++;
+            pagesSinceLaunch = 0;
+            consecutiveFaults = 0;
+            browser.once('disconnected', () => {
+                if (sharedBrowser === browser) {
+                    sharedBrowser = null;
+                    console.warn('⚠️ Browser disconnected — a fresh one launches on the next page');
+                }
+            });
+            sharedBrowser = browser;
+            return browser;
+        })().finally(() => { launching = null; });
     }
-    return sharedBrowser;
+    return launching;
 }
 
 /**
- * Closes the shared browser if it is open.
+ * Closes the shared browser if it is open. A close that hangs is not
+ * waited on for long, and the Chrome process is killed regardless so a
+ * wedged browser cannot survive as a zombie eating memory.
  */
 export async function closeBrowser() {
     if (sharedBrowser) {
         const b = sharedBrowser;
         sharedBrowser = null;
-        await b.close().catch(() => {});
+        await Promise.race([b.close().catch(() => {}), waitMs(10000)]);
+        try { b.process()?.kill('SIGKILL'); } catch { /* already gone */ }
     }
 }
+
+/**
+ * Replaces the shared browser. Waits briefly for tabs in flight to
+ * finish so their pages are kept; anything still open after that dies
+ * with the browser and its worker retries the page.
+ * @param {string} reason - Logged.
+ * @returns {Promise<void>}
+ */
+export function recycleBrowser(reason) {
+    if (recycling) return recycling;
+    recycling = (async () => {
+        console.warn(`♻️ Recycling browser: ${reason} (${activePages} tab(s) in flight)`);
+        const started = Date.now();
+        while (activePages > 0 && Date.now() - started < RECYCLE_DRAIN_MS) await waitMs(200);
+        await closeBrowser();
+        stats.recycles++;
+    })().finally(() => { recycling = null; });
+    return recycling;
+}
+
+/** Browser health, for /health and the logs. */
+export const browserStats = () => ({
+    ...stats,
+    connected: Boolean(sharedBrowser?.connected),
+    activePages,
+    pagesSinceLaunch,
+    recycling: Boolean(recycling),
+});
+
+/**
+ * Opens a tab in the shared browser, bounded and health-tracked. Throws
+ * a transient error when the browser cannot supply one; two failures in
+ * a row recycle the browser in the background.
+ * @returns {Promise<object>} Puppeteer page.
+ */
+async function acquirePage() {
+    const budget = recycleAfterPages();
+    if (budget > 0 && pagesSinceLaunch >= budget && sharedBrowser?.connected) {
+        await recycleBrowser(`${pagesSinceLaunch} pages since launch`);
+    }
+    const browser = await getBrowser();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error(`browser did not open a tab within ${newPageTimeoutMs()}ms`)),
+            newPageTimeoutMs(),
+        );
+    });
+    try {
+        const page = await Promise.race([browser.newPage(), timeout]);
+        consecutiveFaults = 0;
+        pagesSinceLaunch++;
+        activePages++;
+        return page;
+    } catch (err) {
+        stats.faults++;
+        consecutiveFaults++;
+        if (consecutiveFaults >= FAULTS_BEFORE_RECYCLE) {
+            void recycleBrowser(`${consecutiveFaults} consecutive tab failures — ${err.message}`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Errors that say nothing about the page and everything about the
+ * moment: a wedged or restarting browser, a dropped connection, a slow
+ * origin. Worth one more try after a pause. A page deadline is
+ * deliberately not here — a page that needed two minutes will need two
+ * minutes again.
+ */
+const TRANSIENT_ERROR = new RegExp([
+    'Timed out after waiting',
+    'did not open a tab',
+    'Target closed',
+    'Session closed',
+    'Protocol error',
+    'Connection closed',
+    'browser has disconnected',
+    'Navigation timeout',
+    'net::ERR_(CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_REFUSED|CONNECTION_TIMED_OUT|TIMED_OUT|NETWORK_CHANGED|EMPTY_RESPONSE|HTTP2_PROTOCOL_ERROR|SOCKET_NOT_CONNECTED|INTERNET_DISCONNECTED|NETWORK_IO_SUSPENDED)',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'socket hang up',
+].join('|'), 'i');
+
+/** @param {string} message */
+export const isTransientError = (message) => TRANSIENT_ERROR.test(String(message ?? ''));
 
 /**
  * Builds a file path that preserves the website structure.
@@ -139,6 +274,7 @@ async function downloadPageImages(page, pageUrl, imgDir) {
  * @property {number}   [status] HTTP status of the main navigation response.
  * @property {string[]} links   Absolute URLs of all <a href> links on the rendered page.
  * @property {string}   [error] Error message when ok is false.
+ * @property {boolean}  [transient] The failure was momentary (browser, network) — worth a retry.
  */
 
 /**
@@ -156,17 +292,30 @@ const pageDeadlineMs = () => Math.max(30000, Number(process.env.DS_PAGE_TIMEOUT_
  *
  * The whole operation races a per-page deadline and the caller's abort
  * signal, so a hung page costs at most pageDeadlineMs and a cancelled
- * job stops mid-page rather than after it.
+ * job stops mid-page rather than after it. Never throws: every failure,
+ * including the browser refusing to open a tab, comes back as a result
+ * with `ok: false` — one bad page (or one bad moment for Chrome) must
+ * never take the crawl down with it. `transient` marks failures worth
+ * retrying.
  *
- * @param {object} browser - Puppeteer browser instance.
+ * @param {object|null} _browser - Ignored; the shared browser is fetched
+ *   per page so a recycled browser is picked up automatically.
  * @param {string} url - The URL to scrape.
  * @param {string} outDir - Base directory for output.
  * @param {ScrapeOptions & {signal?: AbortSignal}} options - Scrape options.
  * @returns {Promise<ScrapeResult>}
  */
-export async function scrapePage(browser, url, outDir, options = {}) {
+export async function scrapePage(_browser, url, outDir, options = {}) {
     const { signal } = options;
-    const page = await browser.newPage();
+    if (signal?.aborted) return { ok: false, links: [], error: 'cancelled' };
+
+    let page;
+    try {
+        page = await acquirePage();
+    } catch (err) {
+        console.error(`❌ Could not open a tab for ${url}: ${err.message}`);
+        return { ok: false, links: [], error: err.message, transient: true };
+    }
 
     let timer;
     let onAbort;
@@ -186,13 +335,14 @@ export async function scrapePage(browser, url, outDir, options = {}) {
         return await Promise.race([scrapePageInner(page, url, outDir, options), deadline]);
     } catch (err) {
         console.error(`❌ Error processing ${url}:`, err.message);
-        return { ok: false, links: [], error: err.message };
+        return { ok: false, links: [], error: err.message, transient: isTransientError(err.message) };
     } finally {
         clearTimeout(timer);
         if (signal && onAbort) signal.removeEventListener('abort', onAbort);
         // Closing a wedged page can itself hang — never wait on it for
         // more than a moment; a leaked tab dies with the shared browser.
         await Promise.race([page.close().catch(() => {}), waitMs(5000)]);
+        activePages = Math.max(0, activePages - 1);
     }
 }
 
