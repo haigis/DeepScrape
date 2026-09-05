@@ -28,8 +28,9 @@ import { analyzeAccess } from './access.js';
 const MAX_PAGES = Number(process.env.DS_MAX_ANALYZED_PAGES) || 100000;
 const MAX_EVIDENCE = 12;
 
-/** scanPath -> { token, report } */
+/** scanPath -> { token, report }. Bounded: a 10k-page report is megabytes. */
 const reportCache = new Map();
+const MAX_CACHED_REPORTS = Number(process.env.DS_MAX_CACHED_REPORTS) || 12;
 
 const norm = (value) => (value ?? '').replace(/\s+/g, ' ').trim();
 const lower = (value) => norm(value).toLowerCase();
@@ -743,6 +744,8 @@ export async function getConsistencyReport(scanPath, scan, token) {
     const cached = reportCache.get(scanPath);
     if (cached && cached.token === token) return cached.report;
     const report = await buildConsistencyReport(scanPath, scan);
+    reportCache.delete(scanPath);
     reportCache.set(scanPath, { token, report });
+    while (reportCache.size > MAX_CACHED_REPORTS) reportCache.delete(reportCache.keys().next().value);
     return report;
 }

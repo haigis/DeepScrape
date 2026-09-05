@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import axios from 'axios';
 import { HTTP_USER_AGENT } from './scraper.js';
+import { waitMs } from './utils.js';
 
 /**
  * Makes a saved page a self-contained offline copy: every asset it
@@ -21,6 +22,34 @@ export const ASSET_DIR = '_assets';
 const MAX_ASSETS_PER_PAGE = 300;
 const MAX_ASSET_BYTES = 12 * 1024 * 1024;
 const MAX_CSS_DEPTH = 3;
+/** Parallel asset fetches per page. */
+const assetConcurrency = () => Math.max(1, Math.min(16, Number(process.env.DS_ASSET_CONCURRENCY) || 6));
+
+/**
+ * What each scan has already fetched: url -> { local } (null = failed).
+ *
+ * Pages of one site share almost all their assets, and before this
+ * every page fetched every asset again — 200 sequential requests per
+ * page on a big site, which on a slow CDN alone exceeded the page
+ * deadline and lost the page. Failures are remembered too, so a dead
+ * host costs one page its retries, not every page after it.
+ */
+const scanCaches = new Map();
+const MAX_SCAN_CACHES = 8;
+function cacheFor(scanDir) {
+    let cache = scanCaches.get(scanDir);
+    if (!cache) {
+        cache = new Map();
+        scanCaches.set(scanDir, cache);
+        while (scanCaches.size > MAX_SCAN_CACHES) scanCaches.delete(scanCaches.keys().next().value);
+    }
+    return cache;
+}
+
+/** Test hook: forget everything fetched so far. */
+export function resetAssetCache() {
+    scanCaches.clear();
+}
 
 const EXT_BY_TYPE = {
     'text/css': '.css',
@@ -201,50 +230,83 @@ export async function downloadAssets(html, pageUrl, scanDir, pageDir) {
     /** Stylesheets downloaded here, awaiting url() rewriting. */
     const cssToRewrite = [];
     const failures = [];
+    const cache = cacheFor(scanDir);
+    let reused = 0;
 
     await fs.mkdir(assetsAbsDir, { recursive: true });
 
-    while (queue.length) {
-        const { url, depth } = queue.shift();
+    const fetchOne = async ({ url, depth }) => {
+        const known = cache.get(url);
+        if (known) {
+            // Fetched (or found dead) by an earlier page of this scan. A
+            // cached stylesheet was rewritten and its nested assets
+            // fetched at the time, so nothing more is queued here.
+            if (known.local) {
+                map.set(url, known.local);
+                reused++;
+            } else {
+                failed++;
+            }
+            return;
+        }
         try {
             const response = await fetchAsset(url, pageUrl);
 
             const contentType = response.headers['content-type'] ?? '';
             const fileName = assetFileName(url, contentType);
-            let buffer = Buffer.from(response.data);
+            const buffer = Buffer.from(response.data);
+            const local = `${ASSET_DIR}/${fileName}`;
 
             // Stylesheets can pull in fonts and images of their own.
             if (contentType.includes('text/css') && depth < MAX_CSS_DEPTH) {
-                let css = buffer.toString('utf8');
+                const css = buffer.toString('utf8');
                 for (const nested of collectCssUrls(css, url)) {
                     if (!seen.has(nested) && seen.size < MAX_ASSETS_PER_PAGE * 2) {
                         seen.add(nested);
                         queue.push({ url: nested, depth: depth + 1 });
                     }
                 }
-                // Rewrite after nested assets are queued; resolved below.
-                map.set(url, `${ASSET_DIR}/${fileName}`);
-                await fs.writeFile(path.join(assetsAbsDir, fileName), buffer);
-                saved++;
-                bytes += buffer.length;
                 // Remember the CSS so its url()s can be rewritten at the end.
                 cssToRewrite.push({ fileName, baseUrl: url });
-                continue;
             }
 
             await fs.writeFile(path.join(assetsAbsDir, fileName), buffer);
-            map.set(url, `${ASSET_DIR}/${fileName}`);
+            map.set(url, local);
+            cache.set(url, { local });
             saved++;
             bytes += buffer.length;
         } catch (err) {
             failed++;
+            cache.set(url, { local: null });
             failures.push(`${err.response?.status ?? err.code ?? err.message}: ${url}`);
         }
-    }
+    };
+
+    // A few at a time; a worker that finds nested CSS assets refills the
+    // queue, so a worker with nothing to do waits for the others.
+    let inFlight = 0;
+    const worker = async () => {
+        for (;;) {
+            const next = queue.shift();
+            if (!next) {
+                if (inFlight === 0) return;
+                await waitMs(20);
+                continue;
+            }
+            inFlight++;
+            try {
+                await fetchOne(next);
+            } finally {
+                inFlight--;
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: assetConcurrency() }, worker));
 
     if (failures.length) {
         console.warn(`⚠️ ${failures.length} asset(s) failed: ${failures.slice(0, 3).join(' | ')}`);
     }
+    if (reused) console.log(`♻️ ${reused} asset(s) reused from earlier pages of this scan`);
 
     // Rewrite url() references inside downloaded CSS to the local copies.
     for (const { fileName, baseUrl } of cssToRewrite) {

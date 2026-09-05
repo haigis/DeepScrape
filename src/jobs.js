@@ -77,11 +77,13 @@ const runningNonPriority = new Set();
  * marked failed with a reason, which is still far better than the 404
  * the poller used to get.
  *
- * Written next to the scan output, which is already a persistent volume.
+ * Written inside the scan output folder — the one path that is certainly
+ * a persistent volume in every deployment; a sibling of it may be
+ * container-local and vanish on redeploy, taking the records with it.
  * Test runs never persist (VITEST): they must not read or leave state.
  */
 const STATE_FILE = path.join(
-    process.env.DS_STATE_DIR || path.dirname(process.env.OUTPUT_DIR || '/data/output'),
+    process.env.DS_STATE_DIR || process.env.OUTPUT_DIR || 'output',
     'jobs.json',
 );
 const PERSIST = !process.env.VITEST;

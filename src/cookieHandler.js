@@ -53,7 +53,11 @@ export async function handleCookieBanner(page, url) {
     if (config.clickSelector) {
         try {
             console.log(`🔍 Trying to click: ${config.clickSelector}`);
-            await page.waitForSelector(config.clickSelector, { timeout: 5000 });
+            // Short: the page has already reached network idle, so the
+            // banner is there now or not at all — and once dismissed, the
+            // consent cookie keeps it away on every later page, where a
+            // long wait here was pure cost (5s × every page of the site).
+            await page.waitForSelector(config.clickSelector, { timeout: 1500 });
             await page.evaluate((selector) => {
                 let btn = document.querySelector(selector);
                 if (btn) btn.click();

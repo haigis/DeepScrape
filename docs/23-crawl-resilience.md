@@ -95,3 +95,21 @@ restart policy restarts a wedged container and the crawls resume.
   stall watchdog firing and not firing.
 - Local end-to-end: a real crawl killed with SIGTERM mid-run, the API
   restarted, the same job id resumed from its checkpoint and completed.
+
+## Follow-up review (coherence#64, second pass)
+
+- **Assets fetched once per scan** (`offline.js`): every page used to
+  re-download all of its assets, sequentially — 200+ requests a page,
+  which on a slow CDN alone could exceed the page deadline and lose the
+  page and its links. Now a per-scan cache (successes and failures) and
+  `DS_ASSET_CONCURRENCY` (6) parallel fetches.
+- **Global tab cap** `DS_MAX_TABS` (8) across all jobs; a browser fault
+  only counts against the browser it happened on.
+- **Screenshots never fail a saved page** (`DS_SCREENSHOT_TIMEOUT_MS`,
+  45s): the HTML and links are kept, the screenshot is skipped.
+- Cookie-banner wait 5s → 1.5s per page (the consent cookie persists
+  after the first dismissal, so the wait was pure cost on every page).
+- Job records live at `$OUTPUT_DIR/jobs.json`, on the volume.
+- A report build that fails twice for the same folder state returns 500
+  with the reason to `?wait=0` pollers, instead of an eventual timeout.
+- The in-memory report cache is bounded (`DS_MAX_CACHED_REPORTS`, 12).

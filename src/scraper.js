@@ -77,6 +77,24 @@ const newPageTimeoutMs = () => Math.max(5000, Number(process.env.DS_NEW_PAGE_TIM
 const FAULTS_BEFORE_RECYCLE = 2;
 /** Longest a recycle waits for in-flight tabs before killing them. */
 const RECYCLE_DRAIN_MS = 30000;
+/**
+ * Tabs open at once across every job. Per-crawl workers × concurrent
+ * jobs is otherwise unbounded (6 × 3 = 18 tabs rendering full pages
+ * with screenshots), which is exactly the memory pressure that wedges
+ * Chrome in the first place.
+ */
+const maxTabs = () => Math.max(1, Number(process.env.DS_MAX_TABS) || 8);
+/** A screenshot slower than this is skipped; the page is already saved. */
+const screenshotTimeoutMs = () => Math.max(5000, Number(process.env.DS_SCREENSHOT_TIMEOUT_MS) || 45000);
+
+/** Races a promise against a timer that is cleared when it settles. */
+function withTimeout(promise, ms, message) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Returns the shared Puppeteer browser, launching it if needed.
@@ -157,6 +175,8 @@ async function acquirePage() {
     if (budget > 0 && pagesSinceLaunch >= budget && sharedBrowser?.connected) {
         await recycleBrowser(`${pagesSinceLaunch} pages since launch`);
     }
+    // Wait for a tab slot; a recycle in progress also holds new tabs back.
+    while (activePages >= maxTabs() || recycling) await waitMs(100);
     const browser = await getBrowser();
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -172,10 +192,15 @@ async function acquirePage() {
         activePages++;
         return page;
     } catch (err) {
-        stats.faults++;
-        consecutiveFaults++;
-        if (consecutiveFaults >= FAULTS_BEFORE_RECYCLE) {
-            void recycleBrowser(`${consecutiveFaults} consecutive tab failures — ${err.message}`);
+        // A failure on a browser that has since been replaced says
+        // nothing about the new one — never let it recycle a healthy
+        // browser that just launched.
+        if (browser === sharedBrowser) {
+            stats.faults++;
+            consecutiveFaults++;
+            if (consecutiveFaults >= FAULTS_BEFORE_RECYCLE) {
+                void recycleBrowser(`${consecutiveFaults} consecutive tab failures — ${err.message}`);
+            }
         }
         throw err;
     } finally {
@@ -431,13 +456,22 @@ async function scrapePageInner(page, url, outDir, options = {}) {
         }
 
         if (screenshot) {
+            // The page is saved and its links are in hand. A screenshot
+            // that fails or drags — a 60,000px page through sharp — costs
+            // the screenshot, never the page or the crawl below it.
             console.log(`📸 Capturing screenshot for: ${url}`);
-            await autoScroll(page);
-            await waitMs(2000);
-            await page.evaluate(() => window.scrollTo(0, 0));
-            await waitMs(1000);
-            const screenshotFile = savePath.replace(/\.html?$/i, '.webp');
-            await captureWebpScreenshot(page, screenshotFile);
+            try {
+                await withTimeout((async () => {
+                    await autoScroll(page);
+                    await waitMs(2000);
+                    await page.evaluate(() => window.scrollTo(0, 0));
+                    await waitMs(1000);
+                    const screenshotFile = savePath.replace(/\.html?$/i, '.webp');
+                    await captureWebpScreenshot(page, screenshotFile);
+                })(), screenshotTimeoutMs(), `screenshot took longer than ${screenshotTimeoutMs()}ms`);
+            } catch (err) {
+                console.warn(`⚠️ Screenshot skipped for ${url}: ${err.message}`);
+            }
         }
 
         return { ok: true, status, links };

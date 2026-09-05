@@ -674,6 +674,8 @@ app.get('/scan/qa', async (req, res) => {
  * running one, always for the newest folder state seen.
  */
 const reportBuilds = new Map();
+/** scanPath -> { token, message, count }: builds that threw, so a poller learns why. */
+const reportFailures = new Map();
 function ensureReportBuild(scanPath, scan, token) {
   const current = reportBuilds.get(scanPath);
   if (current) {
@@ -683,7 +685,13 @@ function ensureReportBuild(scanPath, scan, token) {
   const entry = { token, next: null };
   reportBuilds.set(scanPath, entry);
   getConsistencyReport(scanPath, scan, token)
-    .catch(err => console.error(`❌ Consistency report for ${scan} failed: ${err.message}`))
+    .then(() => reportFailures.delete(scanPath))
+    .catch(err => {
+      const previous = reportFailures.get(scanPath);
+      const count = previous?.token === token ? previous.count + 1 : 1;
+      reportFailures.set(scanPath, { token, message: err.message, count });
+      console.error(`❌ Consistency report for ${scan} failed (attempt ${count}): ${err.message}`);
+    })
     .finally(() => {
       reportBuilds.delete(scanPath);
       if (entry.next && entry.next !== token) ensureReportBuild(scanPath, scan, entry.next);
@@ -713,6 +721,13 @@ app.get('/scan/consistency', async (req, res) => {
     }
     const last = peekConsistencyReport(scanPath);
     if (last && last.token === token) return res.json({ ...last.report, fresh: true });
+    // A build that failed twice for this exact folder state will fail a
+    // third time; tell the poller why instead of letting it wait out
+    // its timeout with no reason to show.
+    const failure = reportFailures.get(scanPath);
+    if (failure && failure.token === token && failure.count >= 2) {
+      return res.status(500).json({ error: `The analysis of this scan failed: ${failure.message}` });
+    }
     ensureReportBuild(scanPath, scan, token);
     if (last) return res.json({ ...last.report, fresh: false });
     res.status(202).json({ pending: true, scan });
@@ -746,7 +761,10 @@ app.get('/health', (req, res) => {
     if (!make || !job.params?.url) return null;
     const live = { dynamicExcludes: [] };
     registerLiveCrawl(job.id, live);
-    return { runner: make(live), params: { resume: true, scanDate: scanDateOf(job.params.scanDate) } };
+    // Jobs created before scanDate existed resume into the folder of the
+    // day they started, not today's.
+    const startedOn = typeof job.createdAt === 'string' ? job.createdAt.slice(0, 10) : undefined;
+    return { runner: make(live), params: { resume: true, scanDate: scanDateOf(job.params.scanDate ?? startedOn) } };
   });
   if (resumed.resumed.length || resumed.failed.length) {
     console.log(`🔁 After restart: ${resumed.resumed.length} crawl(s) re-queued, ${resumed.failed.length} job(s) failed`);
