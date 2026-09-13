@@ -46,6 +46,21 @@ export function classifyHref(href) {
  *            nofollow: boolean, ugc: boolean, sponsored: boolean,
  *            tag: 'a'|'area'}[]}
  */
+/** Value of one attribute inside a tag's attribute string, or null. */
+const attrValue = (attrs, name) => {
+    const match = attrs.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i'));
+    return match ? (match[1] ?? match[2] ?? '').trim() || null : null;
+};
+
+/** data-* attributes as a plain object, prefix removed, values as strings. */
+const dataAttributes = (attrs) => {
+    const data = {};
+    for (const match of attrs.matchAll(/(?:^|\s)data-([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+        data[match[1].toLowerCase()] = (match[2] ?? match[3] ?? '').trim();
+    }
+    return data;
+};
+
 export function extractAnchors(html, { includeNonHttp = false, chromeSelectors = null } = {}) {
     const links = [];
 
@@ -93,6 +108,11 @@ export function extractAnchors(html, { includeNonHttp = false, chromeSelectors =
             nofollow: relTokens.includes('nofollow'),
             ugc: relTokens.includes('ugc'),
             sponsored: relTokens.includes('sponsored'),
+            // Identity attributes, so a watched link can be checked for an
+            // analytics id or data-* hook that changed by mistake.
+            id: attrValue(attrs, 'id'),
+            className: attrValue(attrs, 'class'),
+            data: dataAttributes(attrs),
         });
     };
 
@@ -204,6 +224,8 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
     const index = new Map();
     /** path -> { h1, title } so link labels can name the page, not the anchor. */
     const pageMeta = new Map();
+    /** target path -> the absolute URL it was first linked with. */
+    const targetUrls = new Map();
 
     // Read in batches so a large scan doesn't open thousands of handles.
     const BATCH = 32;
@@ -226,8 +248,10 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
             // Collapse repeats of the same target within one source page.
             const perTarget = new Map();
             for (const link of extractAnchors(html, { chromeSelectors })) {
-                const targetRel = urlToScanPath(link.href.split('#')[0]);
+                const cleanHref = stripTrailingSlash(link.href.split('#')[0]);
+                const targetRel = urlToScanPath(cleanHref);
                 if (!targetRel || targetRel === file.rel) continue;
+                if (!targetUrls.has(targetRel)) targetUrls.set(targetRel, cleanHref);
 
                 const entry = perTarget.get(targetRel);
                 if (entry) {
@@ -237,8 +261,14 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
                     }
                     entry.nofollow = entry.nofollow && link.nofollow;
                     // A page linked from both its nav and its body counts
-                    // as a content link — the editorial one is the signal.
-                    if (link.region === 'content') entry.region = 'content';
+                    // as a content link — the editorial one is the signal,
+                    // so its identity attributes win too.
+                    if (link.region === 'content' && entry.region !== 'content') {
+                        entry.region = 'content';
+                        entry.id = link.id;
+                        entry.className = link.className;
+                        entry.data = link.data;
+                    }
                 } else {
                     perTarget.set(targetRel, {
                         path: file.rel,
@@ -248,6 +278,9 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
                         nofollow: link.nofollow,
                         region: link.region ?? 'content',
                         scraped: true,
+                        id: link.id,
+                        className: link.className,
+                        data: link.data,
                     });
                 }
             }
@@ -272,11 +305,223 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
     const value = {
         index,
         pageMeta,
+        targetUrls,
         pagesIndexed: considered.length,
         truncated: files.length > MAX_INDEXED_PAGES,
     };
     inboundCache.set(scanPath, { token, value });
     return value;
+}
+
+/** URLs the crawl recorded as broken, trailing slashes stripped. */
+async function readBrokenSet(scanPath) {
+    try {
+        const raw = await fs.readFile(path.join(scanPath, 'broken-links.txt'), 'utf8');
+        return new Set(raw.split('\n').map(l => stripTrailingSlash(l.trim())).filter(Boolean));
+    } catch {
+        return new Set();
+    }
+}
+
+/** A source entry from the inbound index in the shape the link endpoints publish. */
+const publishSource = (entry) => ({
+    path: entry.path,
+    url: entry.url ?? null,
+    title: entry.title ?? null,
+    text: entry.anchorTexts[0] ?? '',
+    region: entry.region ?? 'content',
+    nofollow: Boolean(entry.nofollow),
+    occurrences: entry.occurrences ?? 1,
+    id: entry.id ?? null,
+    className: entry.className ?? null,
+    data: entry.data ?? {},
+});
+
+/** Content-region sources first, then the richest anchors. */
+const sortSources = (sources) => [...sources].sort((a, b) =>
+    (a.region === 'content' ? 0 : 1) - (b.region === 'content' ? 0 : 1)
+    || b.anchorTexts.length - a.anchorTexts.length
+    || b.occurrences - a.occurrences
+    || (a.path ?? '').localeCompare(b.path ?? ''));
+
+/** Hostnames match when they differ only by a leading www. */
+const sameSite = (a, b) => a.replace(/^www\./, '') === b.replace(/^www\./, '');
+
+/**
+ * Aggregates one link target from the pages that link to it.
+ * @param {string} rel - Target scan path.
+ * @param {object[]} sources - Inbound index entries.
+ * @param {object} ctx - { domain, pageMeta, targetUrls, brokenSet, maxSources }
+ */
+function describeTarget(rel, sources, { domain, pageMeta, targetUrls, brokenSet, maxSources }) {
+    const meta = pageMeta.get(rel);
+    const url = targetUrls.get(rel) ?? meta?.url ?? `https://${rel.replace(/\/index\.html$/i, '/').replace(/\.html?$/i, '')}`;
+    let host;
+    try {
+        host = new URL(url).hostname;
+    } catch {
+        host = rel.split('/')[0];
+    }
+    const internal = sameSite(host, domain);
+    const scraped = pageMeta.has(rel);
+    const regions = {};
+    const anchorTexts = [];
+    let occurrences = 0;
+    let contentInbound = 0;
+    let allNofollow = sources.length > 0;
+    for (const source of sources) {
+        const region = source.region ?? 'content';
+        regions[region] = (regions[region] ?? 0) + 1;
+        occurrences += source.occurrences ?? 1;
+        if (region === 'content') contentInbound++;
+        if (!source.nofollow) allNofollow = false;
+        for (const text of source.anchorTexts) {
+            if (text && !anchorTexts.includes(text) && anchorTexts.length < 5) anchorTexts.push(text);
+        }
+    }
+    return {
+        url,
+        host,
+        internal,
+        path: internal ? rel : null,
+        scraped,
+        broken: internal && !scraped && brokenSet.has(stripTrailingSlash(url)),
+        title: meta?.title ?? null,
+        h1: meta?.h1 ?? null,
+        inbound: sources.length,
+        contentInbound,
+        occurrences,
+        nofollow: allNofollow,
+        regions,
+        anchorTexts,
+        sources: sortSources(sources).slice(0, maxSources).map(publishSource),
+    };
+}
+
+/** Sort/filter caps for the link inventory. */
+const INVENTORY_SOURCES = 10;
+const CHECK_SOURCES = 100;
+const MAX_CHECK_URLS = 500;
+
+/**
+ * Every link target in a scan, aggregated from the anchors of all saved
+ * pages: who links to it, from which regions, with what text and which
+ * identity attributes — plus the saved pages nobody links to (orphans).
+ * Filters and pagination are applied here so a 10k-page site never has
+ * to ship its whole graph to the caller.
+ *
+ * @param {string} scanPath
+ * @param {string} scan - "<domain>/<date>"
+ * @param {{type?: string, q?: string, region?: string, limit?: number, offset?: number, sort?: string}} [opts]
+ * @param {object|object[]|null} [chromeOverrides]
+ */
+export async function getLinkInventory(scanPath, scan, opts = {}, chromeOverrides = null) {
+    const domain = scan.split('/')[0];
+    const { index, pageMeta, targetUrls, pagesIndexed, truncated } = await getInboundIndex(scanPath, chromeOverrides);
+    const brokenSet = await readBrokenSet(scanPath);
+    const ctx = { domain, pageMeta, targetUrls, brokenSet, maxSources: INVENTORY_SOURCES };
+
+    const all = [];
+    for (const [rel, sources] of index) all.push(describeTarget(rel, sources, ctx));
+    for (const rel of pageMeta.keys()) {
+        if (!index.has(rel)) all.push(describeTarget(rel, [], ctx));
+    }
+
+    const hostPages = new Map();
+    for (const target of all) {
+        if (target.internal) continue;
+        const bucket = hostPages.get(target.host) ?? { host: target.host, links: 0, pages: new Set() };
+        bucket.links++;
+        for (const source of index.get(urlToScanPath(target.url)) ?? []) bucket.pages.add(source.path);
+        hostPages.set(target.host, bucket);
+    }
+    const externalHosts = [...hostPages.values()]
+        .map(({ host, links, pages }) => ({ host, links, pages: pages.size }))
+        .sort((a, b) => b.pages - a.pages || b.links - a.links || a.host.localeCompare(b.host));
+
+    const counts = {
+        targets: all.length,
+        internal: all.filter(t => t.internal).length,
+        external: all.filter(t => !t.internal).length,
+        broken: all.filter(t => t.broken).length,
+        notScraped: all.filter(t => t.internal && !t.scraped && !t.broken).length,
+        orphans: all.filter(t => t.scraped && t.inbound === 0).length,
+        externalHosts: externalHosts.length,
+        nofollow: all.filter(t => t.nofollow).length,
+    };
+
+    const type = opts.type ?? 'all';
+    const q = (opts.q ?? '').trim().toLowerCase();
+    let matches = all.filter(t => {
+        if (type === 'internal' && !t.internal) return false;
+        if (type === 'external' && t.internal) return false;
+        if (type === 'broken' && !t.broken) return false;
+        if (type === 'orphan' && !(t.scraped && t.inbound === 0)) return false;
+        if (opts.region === 'content' && t.contentInbound === 0) return false;
+        if (opts.region === 'chrome' && !(t.contentInbound === 0 && t.inbound > 0)) return false;
+        if (q && !(t.url.toLowerCase().includes(q)
+            || t.anchorTexts.some(text => text.toLowerCase().includes(q))
+            || (t.title ?? '').toLowerCase().includes(q))) return false;
+        return true;
+    });
+
+    matches = opts.sort === 'url'
+        ? matches.sort((a, b) => a.url.localeCompare(b.url))
+        : matches.sort((a, b) => Number(b.broken) - Number(a.broken) || b.inbound - a.inbound || a.url.localeCompare(b.url));
+
+    const limit = Math.min(Math.max(Number(opts.limit) || 200, 1), 1000);
+    const offset = Math.max(Number(opts.offset) || 0, 0);
+
+    return {
+        scan,
+        pagesIndexed,
+        indexTruncated: truncated,
+        counts,
+        total: matches.length,
+        offset,
+        limit,
+        links: matches.slice(offset, offset + limit),
+        externalHosts,
+    };
+}
+
+/**
+ * Current state of specific links in a scan — for watched links and
+ * journeys, so a caller can compare the same URLs across scans.
+ *
+ * @param {string} scanPath
+ * @param {string} scan
+ * @param {string[]} urls - Absolute URLs (fragments and trailing slashes are ignored).
+ * @param {object|object[]|null} [chromeOverrides]
+ */
+export async function checkLinks(scanPath, scan, urls, chromeOverrides = null) {
+    const domain = scan.split('/')[0];
+    const { index, pageMeta, targetUrls } = await getInboundIndex(scanPath, chromeOverrides);
+    const brokenSet = await readBrokenSet(scanPath);
+    const ctx = { domain, pageMeta, targetUrls, brokenSet, maxSources: CHECK_SOURCES };
+
+    return urls.slice(0, MAX_CHECK_URLS).map(raw => {
+        const url = stripTrailingSlash(String(raw).split('#')[0].trim());
+        const rel = urlToScanPath(url);
+        if (!rel) {
+            return { url, found: false, internal: false, scraped: false, broken: false, inbound: 0, contentInbound: 0, anchorTexts: [], sources: [] };
+        }
+        const sources = index.get(rel) ?? [];
+        // Describe against the caller's URL, not the first-linked variant,
+        // so the echo is exact.
+        const target = describeTarget(rel, sources, { ...ctx, targetUrls: new Map([[rel, url]]) });
+        return {
+            url,
+            found: sources.length > 0,
+            internal: target.internal,
+            scraped: target.scraped,
+            broken: target.internal && !target.scraped && brokenSet.has(url),
+            inbound: target.inbound,
+            contentInbound: target.contentInbound,
+            anchorTexts: target.anchorTexts,
+            sources: target.sources,
+        };
+    });
 }
 
 /** Collapses markup and whitespace inside an element's inner HTML. */

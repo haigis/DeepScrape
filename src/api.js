@@ -7,7 +7,7 @@ import { fetchSitemapUrls, discoverSitemaps } from './sitemap.js';
 import { spiderCrawl, makeScope } from './spider.js';
 import { generateOutputDir } from './fileHandler.js';
 import { createJob, getJob, listJobs, cancelJob, moveJob, updateJob, resumeInterrupted, queueStats } from './jobs.js';
-import { buildScanTree, getPageDetails, getPageHistory, getScanToken } from './scanStore.js';
+import { buildScanTree, getPageDetails, getPageHistory, getScanToken, getLinkInventory, checkLinks } from './scanStore.js';
 import { getConsistencyReport, peekConsistencyReport } from './consistency.js';
 import { buildDashboard, buildPageAttributes } from './analytics.js';
 import { extractScanQa } from './qa.js';
@@ -571,6 +571,93 @@ app.get('/scan/page', async (req, res) => {
     // FM-style attributes scored against the rest of the scan.
     const profile = await buildPageAttributes(scanPath, rel, details);
     res.json({ ...details, ...(profile ?? {}) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Site-chrome overrides shared by the link endpoints: the named groups
+ * a customer configured, or the legacy per-region selector params.
+ * Returns null when ?chrome is not valid JSON.
+ */
+function chromeOverridesFrom(query) {
+  let overrides = {
+    nav: query.navSelector,
+    header: query.headerSelector,
+    footer: query.footerSelector,
+  };
+  if (query.chrome) {
+    try {
+      const parsed = typeof query.chrome === 'string' ? JSON.parse(query.chrome) : query.chrome;
+      if (Array.isArray(parsed)) overrides = parsed;
+    } catch {
+      return null;
+    }
+  }
+  return overrides;
+}
+
+/**
+ * GET /scan/links?scan=<domain>/<date>[&type=all|internal|external|broken|orphan]
+ *   [&q=text][&region=content|chrome][&limit=200][&offset=0][&sort=inbound|url][&chrome=[...]]
+ * Whole-scan link inventory: every target with its sources, regions,
+ * anchor texts and identity attributes, filtered and paged server-side.
+ */
+app.get('/scan/links', async (req, res) => {
+  const scan = req.query.scan;
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'Scan parameter is required' });
+  }
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  const chromeOverrides = chromeOverridesFrom(req.query);
+  if (chromeOverrides === null) {
+    return res.status(400).json({ error: 'chrome must be a JSON array of {name, selector, enabled}' });
+  }
+
+  const pick = (value, allowed) => (typeof value === 'string' && allowed.includes(value) ? value : undefined);
+  try {
+    const inventory = await getLinkInventory(scanPath, scan, {
+      type: pick(req.query.type, ['all', 'internal', 'external', 'broken', 'orphan']),
+      region: pick(req.query.region, ['content', 'chrome']),
+      sort: pick(req.query.sort, ['inbound', 'url']),
+      q: typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : undefined,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    }, chromeOverrides);
+    res.json(inventory);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /scan/links/check  { scan, urls: string[], chrome?: [...] }
+ * State of specific links in one scan, for watched links and journeys.
+ */
+app.post('/scan/links/check', async (req, res) => {
+  const { scan, urls, chrome } = req.body ?? {};
+  if (!scan || typeof scan !== 'string') {
+    return res.status(400).json({ error: 'scan is required' });
+  }
+  if (!Array.isArray(urls) || urls.length === 0 || urls.length > 500 || urls.some(u => typeof u !== 'string')) {
+    return res.status(400).json({ error: 'urls must be an array of 1 to 500 strings' });
+  }
+  const scanPath = resolveScanPath(scan);
+  if (!scanPath) return res.status(400).json({ error: 'Invalid scan path' });
+  if (!fs.existsSync(scanPath)) return res.status(404).json({ error: 'Scan directory not found' });
+
+  const chromeOverrides = chromeOverridesFrom({ chrome });
+  if (chromeOverrides === null) {
+    return res.status(400).json({ error: 'chrome must be an array of {name, selector, enabled}' });
+  }
+
+  try {
+    const results = await checkLinks(scanPath, scan, urls, chromeOverrides);
+    res.json({ scan, results });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
