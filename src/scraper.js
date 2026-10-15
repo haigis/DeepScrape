@@ -371,10 +371,27 @@ export async function scrapePage(_browser, url, outDir, options = {}) {
     }
 }
 
+let cachedUserAgent = null;
+/**
+ * The browser's own user agent plus an honest product token, so a site
+ * owner reading their logs can see what this is and who to ask.
+ * DS_USER_AGENT replaces it entirely; DS_CONTACT_URL sets the link.
+ */
+async function crawlerUserAgent(page) {
+    if (process.env.DS_USER_AGENT) return process.env.DS_USER_AGENT;
+    if (!cachedUserAgent) {
+        const base = await page.browser().userAgent();
+        const contact = process.env.DS_CONTACT_URL || 'https://coherence.ac0rn.io';
+        cachedUserAgent = `${base} DeepScrape/1.0 (+${contact})`;
+    }
+    return cachedUserAgent;
+}
+
 async function scrapePageInner(page, url, outDir, options = {}) {
     const { screenshot, downloadImages, offline, cookieDismissal } = resolveOptions(options);
     console.log(`🌍 Navigating: ${url}`);
     await page.setViewport({ width: 1440, height: 900 });
+    await page.setUserAgent(await crawlerUserAgent(page));
 
     {
         // When the scan wants neither screenshots nor images, the pixels
@@ -414,6 +431,14 @@ async function scrapePageInner(page, url, outDir, options = {}) {
         // and avoids re-fetching the page with a second HTTP client.
         const links = await page.$$eval('a[href]', anchors =>
             anchors.map(a => a.href).filter(href => /^https?:/i.test(href)));
+
+        // The page's own claim about its canonical address, and where
+        // redirects actually landed — both feed the crawler's dedupe.
+        const canonical = await page.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
+        if (canonical && options.isKnownCanonical?.(canonical)) {
+            console.log(`♻️ Canonical variant: ${url} → ${canonical} — skipping save.`);
+            return { ok: true, status, links: [], duplicateOf: canonical, canonical };
+        }
 
         let html = await page.content();
         html = fixRelativePaths(html, url);
@@ -474,7 +499,7 @@ async function scrapePageInner(page, url, outDir, options = {}) {
             }
         }
 
-        return { ok: true, status, links };
+        return { ok: true, status, links, canonical };
     }
 }
 

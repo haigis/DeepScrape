@@ -1,107 +1,201 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { waitMs } from './utils.js';
 
-// Load cookie banner configurations from `src/cookie_selectors.json`
-let cookieConfigs = {};
-const configPath = path.join(process.cwd(), 'src', 'cookie_selectors.json'); // Ensure correct path
+/**
+ * Cookie-banner dismissal. It exists for clean screenshots — the HTML is
+ * captured either way — so it must stay cheap and must never fail a page.
+ *
+ * Strategy, most specific first:
+ *  1. Per-site config in cookie_selectors.json (a plain selector, or a
+ *     path through shadow roots).
+ *  2. Well-known consent-platform "reject" buttons (OneTrust, Cookiebot,
+ *     Didomi, Tealium, …).
+ *  3. Any visible button/link whose text reads as a refusal ("Reject
+ *     optional cookies", "Only necessary", …). Searched through every
+ *     shadow root and every frame — the reason a hard-coded selector
+ *     path rots the moment a vendor renames a wrapper element.
+ *
+ * Privacy first: the generic search only ever *rejects*. It never
+ * accepts tracking on a site's behalf, so a banner it cannot refuse is
+ * left alone rather than agreed to.
+ */
 
-try {
-    if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf8');
-        cookieConfigs = JSON.parse(configData);
-        console.log("✅ Loaded cookie_selectors.json:", cookieConfigs);
-    } else {
-        console.error("❌ cookie_selectors.json not found at:", configPath);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const configCandidates = [
+    path.join(here, 'cookie_selectors.json'),
+    path.join(process.cwd(), 'src', 'cookie_selectors.json'),
+];
+
+let cookieConfigs = {};
+for (const file of configCandidates) {
+    try {
+        if (!fs.existsSync(file)) continue;
+        cookieConfigs = JSON.parse(fs.readFileSync(file, 'utf8'));
+        console.log(`✅ Loaded cookie config for ${Object.keys(cookieConfigs).length} sites`);
+        break;
+    } catch (err) {
+        console.error(`❌ Could not load ${file}: ${err.message}`);
     }
-} catch (err) {
-    console.error("❌ Could not load cookie_selectors.json:", err.message);
 }
 
-/**
- * Normalize a domain by stripping protocols and paths.
- */
+/** Reject/close buttons of common consent platforms. */
+export const KNOWN_REJECT_SELECTORS = Object.freeze([
+    '#onetrust-reject-all-handler',
+    '#CybotCookiebotDialogBodyButtonDecline',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll',
+    '#didomi-notice-disagree-button',
+    '.didomi-continue-without-agreeing',
+    'button[data-testid="uc-deny-all-button"]',
+    '.qc-cmp2-summary-buttons button[mode="secondary"]',
+    '#truste-consent-required',
+    '.truste-consent-required',
+    '.cc-deny',
+    '.cc-btn.cc-dismiss',
+    '#cookie-reject',
+    'button[aria-label="Reject all"]',
+    '[data-cookiebanner="reject_button"]',
+]);
+
+/** Visible text that reads as "refuse non-essential cookies". */
+const REJECT_TEXT = /^(reject|decline|deny|refuse|disagree|no,? thanks|only (accept )?(strictly )?(necessary|essential)|(necessary|essential|required) (cookies )?only|use (only )?(necessary|essential)|continue without (accepting|agreeing)|reject (all|optional|non-?essential)|decline (all|optional))/i;
+
+/** Per-domain memory so a site without a banner costs nothing. */
+const state = new Map(); // domain -> { dismissed: boolean, misses: number }
+const MAX_MISSES = 3;
+const POLL_MS = 400;
+const POLL_BUDGET_MS = 4000;
+
 function normalizeDomain(url) {
     try {
-        let parsedUrl = new URL(url);
-        return parsedUrl.hostname; // Return only the domain
-    } catch (err) {
+        return new URL(url).hostname;
+    } catch {
         return url;
     }
 }
 
 /**
- * Dismisses the cookie banner for a given domain based on the configuration.
- * First tries a standard click (if clickSelector is provided), then
- * attempts to traverse shadow DOM elements using the provided shadowSelectors.
- *
- * @param {object} page - Puppeteer page object.
- * @param {string} url - Full URL of the current page.
+ * Runs in the page (or a frame): finds and clicks one dismissal control.
+ * Self-contained — it is serialised into the browser.
+ * @param {{ domainConfig: object|null, known: string[], rejectSource: string }} args
+ * @returns {string|null} what was clicked, or null.
+ */
+function findAndClick({ domainConfig, known, rejectSource }) {
+    const reject = new RegExp(rejectSource, 'i');
+
+    const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+        const style = getComputedStyle(el);
+        return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) !== 0;
+    };
+
+    // Every root worth searching: the document plus all open shadow roots.
+    const roots = [];
+    const collect = (root) => {
+        roots.push(root);
+        for (const el of root.querySelectorAll('*')) {
+            if (el.shadowRoot) collect(el.shadowRoot);
+        }
+    };
+    collect(document);
+
+    const fire = (el, why) => {
+        el.click();
+        return why;
+    };
+
+    // 1. Site config: a selector, then a path through shadow roots.
+    if (domainConfig?.clickSelector) {
+        for (const root of roots) {
+            const el = root.querySelector(domainConfig.clickSelector);
+            if (el && visible(el)) return fire(el, `config selector ${domainConfig.clickSelector}`);
+        }
+    }
+    if (domainConfig?.shadowSelectors?.length) {
+        const [first, ...rest] = domainConfig.shadowSelectors;
+        let el = document.querySelector(first);
+        for (const sel of rest) {
+            if (!el) break;
+            el = (el.shadowRoot ?? el).querySelector(sel);
+        }
+        if (el && el !== document.querySelector(first) && visible(el)) return fire(el, 'config shadow path');
+    }
+
+    // 2. Known consent-platform reject buttons.
+    for (const root of roots) {
+        for (const sel of known) {
+            const el = root.querySelector(sel);
+            if (el && visible(el)) return fire(el, `known ${sel}`);
+        }
+    }
+
+    // 3. Any control whose text is a refusal.
+    const candidates = 'button, [role="button"], a, input[type="button"], input[type="submit"]';
+    for (const root of roots) {
+        for (const el of root.querySelectorAll(candidates)) {
+            const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+            if (text.length > 0 && text.length <= 60 && reject.test(text) && visible(el)) {
+                return fire(el, `text "${text}"`);
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Dismisses the cookie banner if there is one.
+ * @param {object} page - Puppeteer page.
+ * @param {string} url - Page URL (for the per-site config and memory).
+ * @returns {Promise<boolean>} true if something was clicked.
  */
 export async function handleCookieBanner(page, url) {
-    const domain = normalizeDomain(url); // Ensure correct domain lookup
-    console.log(`🔍 Checking for cookie banner on: ${domain}`);
+    const domain = normalizeDomain(url);
+    const memo = state.get(domain) ?? { dismissed: false, misses: 0 };
+    state.set(domain, memo);
 
-    const config = cookieConfigs[domain];
-    if (!config) {
-        console.log(`ℹ️ No cookie config found for: ${domain}`);
-        console.log(`ℹ️ Available configs: ${Object.keys(cookieConfigs).join(', ')}`); // Debugging info
-        return;
-    }
+    const args = {
+        domainConfig: cookieConfigs[domain] ?? null,
+        known: KNOWN_REJECT_SELECTORS,
+        rejectSource: REJECT_TEXT.source,
+    };
 
-    // Attempt standard selector click
-    if (config.clickSelector) {
-        try {
-            console.log(`🔍 Trying to click: ${config.clickSelector}`);
-            // Short: the page has already reached network idle, so the
-            // banner is there now or not at all — and once dismissed, the
-            // consent cookie keeps it away on every later page, where a
-            // long wait here was pure cost (5s × every page of the site).
-            await page.waitForSelector(config.clickSelector, { timeout: 1500 });
-            await page.evaluate((selector) => {
-                let btn = document.querySelector(selector);
-                if (btn) btn.click();
-            }, config.clickSelector);
-            console.log(`✅ Cookie banner dismissed via selector: ${config.clickSelector}`);
-            await waitMs(2000);
-            return;
-        } catch (e) {
-            console.log(`⚠️ Failed standard selector dismissal for ${domain}: ${e.message}`);
-        }
-    }
+    // A banner already dismissed on this domain stays away (the consent
+    // cookie lives in the shared browser) and a site that repeatedly
+    // shows none is not worth waiting on: one instant look, no polling.
+    const patient = !memo.dismissed && memo.misses < MAX_MISSES;
+    const deadline = Date.now() + (patient ? POLL_BUDGET_MS : 0);
 
-    // Attempt shadow DOM-based dismissal
-    if (config.shadowSelectors) {
-        try {
-            console.log(`🔍 Attempting shadow DOM dismissal`);
-            const shadowDismissed = await page.evaluate((selectors) => {
-                function traverseShadow(selectors) {
-                    let el = document.querySelector(selectors[0]);
-                    if (!el) return null;
-                    for (let i = 1; i < selectors.length; i++) {
-                        if (!el.shadowRoot) return null;
-                        el = el.shadowRoot.querySelector(selectors[i]);
-                        if (!el) return null;
-                    }
-                    return el;
-                }
-                const btn = traverseShadow(selectors);
-                if (btn) {
-                    btn.click();
-                    return true;
-                }
-                return false;
-            }, config.shadowSelectors);
-
-            if (shadowDismissed) {
-                console.log(`✅ Cookie banner dismissed via Shadow DOM for ${domain}`);
-                await waitMs(3000);
-                return;
-            } else {
-                console.log(`⚠️ Shadow DOM cookie dismissal failed for ${domain}`);
+    for (;;) {
+        for (const frame of page.frames()) {
+            let clicked = null;
+            try {
+                clicked = await frame.evaluate(findAndClick, args);
+            } catch {
+                // Detached or cross-process frame mid-navigation — skip it.
             }
-        } catch (e) {
-            console.log(`⚠️ Error during shadow DOM dismissal for ${domain}: ${e.message}`);
+            if (clicked) {
+                console.log(`✅ Cookie banner dismissed on ${domain} (${clicked})`);
+                memo.dismissed = true;
+                memo.misses = 0;
+                await waitMs(500); // let the overlay animate away
+                return true;
+            }
         }
+        if (Date.now() >= deadline) break;
+        await waitMs(POLL_MS);
     }
+
+    if (!memo.dismissed) {
+        memo.misses++;
+        // Quiet after the first miss: this runs on every page of a crawl.
+        if (memo.misses === 1) console.log(`ℹ️ No cookie banner found on ${domain}`);
+    }
+    return false;
+}
+
+/** Test hook: forget what was learned about sites. */
+export function resetCookieMemory() {
+    state.clear();
 }

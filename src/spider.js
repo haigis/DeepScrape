@@ -3,6 +3,7 @@ import path from 'path';
 import { scrapePage, resolveOptions, getBrowser } from './scraper.js';
 import { generateOutputDir } from './fileHandler.js';
 import { waitMs, shutdownHooks } from './utils.js';
+import { loadRobots } from './robots.js';
 
 /**
  * Path scoping for a crawl. Three inputs combine:
@@ -19,9 +20,9 @@ import { waitMs, shutdownHooks } from './utils.js';
 const MAX_TRACKED_LINKS = Number(process.env.DS_MAX_TRACKED_LINKS) || 150000;
 const MAX_SOURCES_PER_LINK = 25;
 
-/** Crawl workers: request → env → default 4, clamped to 1-16. */
+/** Crawl workers: request → env → default 2 (polite), clamped to 1-16. */
 export const crawlConcurrency = (options = {}) => Math.max(1, Math.min(16,
-    Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 4));
+    Number(options.concurrency) || Number(process.env.DS_CRAWL_CONCURRENCY) || 2));
 
 export function makeScope(options = {}) {
     const normalise = (p) => '/' + String(p).trim().replace(/^\/+|\/+$/g, '');
@@ -70,18 +71,24 @@ const isUncrawlable = (url) => isImageUrl(url) || isBinaryUrl(url);
  * click-tracking noise. Kept conservative: anything not listed here is
  * assumed to be meaningful (?page=2, ?q=…).
  */
-const TRACKING_PARAMS = /^(utm_\w+|gclid|gclsrc|dclid|fbclid|msclkid|mc_[ce]id|igshid|_hs\w+|vero_\w+|yclid|s_kwcid)$/i;
+const TRACKING_PARAMS = /^(utm_\w+|gclid|gclsrc|dclid|fbclid|msclkid|mc_[ce]id|igshid|_hs\w+|vero_\w+|yclid|s_kwcid|_charset_|spellcheck|back|jsessionid|phpsessid|sessionid|sid|ref|ref_src|cid|source|campaign)$/i;
 
 export const normalizeUrl = (url) => {
     const u = new URL(url);
     u.hash = '';
+    u.hostname = u.hostname.toLowerCase();
 
-    // Drop tracking params; sort the rest so ?a=1&b=2 and ?b=2&a=1 match.
+    // ;jsessionid=… path parameters make every visit a "new" URL.
+    u.pathname = u.pathname.replace(/;jsessionid=[^/?]*/i, '').replace(/\/{2,}/g, '/');
+
+    // Drop tracking params and empty/whitespace-only values (a search
+    // box that submitted "   " is the same page as no search); sort the
+    // rest so ?a=1&b=2 and ?b=2&a=1 match.
     const kept = [...u.searchParams.entries()]
-        .filter(([key]) => !TRACKING_PARAMS.test(key))
-        .sort(([a], [b]) => a.localeCompare(b));
+        .filter(([key, value]) => !TRACKING_PARAMS.test(key) && value.trim() !== '')
+        .sort(([a], [b]) => a.localeCompare(b) || a.length - b.length);
     u.search = '';
-    for (const [key, value] of kept) u.searchParams.append(key, value);
+    for (const [key, value] of kept) u.searchParams.append(key, value.trim());
 
     // Trailing-slash twins (/page vs /page/) are one page; keep the root "/".
     if (u.pathname.length > 1 && u.pathname.endsWith('/')) {
@@ -90,6 +97,73 @@ export const normalizeUrl = (url) => {
 
     return u.href;
 };
+
+// --- Crawl traps ------------------------------------------------------------
+
+/** Distinct query-string variants of one page shape we will crawl. */
+const maxQueryVariants = () => Math.max(1, Number(process.env.DS_MAX_QUERY_VARIANTS) || 10);
+const MAX_URL_LENGTH = 1500;
+const MAX_PATH_SEGMENTS = 14;
+
+/**
+ * Guards against URL spaces with no end: faceted search, paginated
+ * result lists (`?offset=500, 510, 520…`), calendars, session ids,
+ * repeating path segments (`/a/b/a/b/…`). The first few variants of a
+ * page are real content; the thousandth is the same template with a
+ * different number in it.
+ *
+ * A URL's *shape* is host + path + the sorted set of query parameter
+ * names. Each shape may contribute at most DS_MAX_QUERY_VARIANTS
+ * distinct URLs; the rest are counted and skipped. A bare path (no
+ * query) is never limited.
+ */
+export function createTrapGuard(limit = maxQueryVariants()) {
+    const shapes = new Map(); // shape -> count of admitted URLs
+    const skipped = new Map(); // shape -> count of refused URLs
+
+    const reason = (url) => {
+        if (url.length > MAX_URL_LENGTH) return 'url-too-long';
+        let u;
+        try { u = new URL(url); } catch { return 'invalid'; }
+        const segments = u.pathname.split('/').filter(Boolean);
+        if (segments.length > MAX_PATH_SEGMENTS) return 'path-too-deep';
+        // A segment appearing 3+ times is a relative-link loop.
+        const seen = new Map();
+        for (const seg of segments) {
+            const n = (seen.get(seg) ?? 0) + 1;
+            if (n >= 3) return 'repeating-path';
+            seen.set(seg, n);
+        }
+        return null;
+    };
+
+    return {
+        /**
+         * @param {string} url - already normalised.
+         * @returns {{ok: boolean, reason?: string}}
+         */
+        admit(url) {
+            const why = reason(url);
+            if (why) return { ok: false, reason: why };
+            const u = new URL(url);
+            if (!u.search) return { ok: true };
+            const names = [...new Set([...u.searchParams.keys()])].sort().join('&');
+            const shape = `${u.host}${u.pathname}?${names}`;
+            const count = shapes.get(shape) ?? 0;
+            if (count >= limit) {
+                skipped.set(shape, (skipped.get(shape) ?? 0) + 1);
+                return { ok: false, reason: 'query-variants' };
+            }
+            shapes.set(shape, count + 1);
+            return { ok: true };
+        },
+        /** shape -> number of URLs refused; for the scan report. */
+        skipped: () => Object.fromEntries(skipped),
+        restore(admittedUrls) {
+            for (const url of admittedUrls) this.admit(url);
+        },
+    };
+}
 
 // --- Retries ----------------------------------------------------------------
 
@@ -307,6 +381,34 @@ export async function spiderCrawl(startUrls, options = {}) {
     /** URLs dropped mid-crawl by a live exclude. */
     const excludedLive = [];
     let retries = 0;
+    /** URLs refused by robots.txt, and by the trap guard (reason -> count). */
+    const robotsBlocked = new Set();
+    const trapSkips = {};
+    const trapGuard = createTrapGuard();
+
+    // robots.txt: fetched once per crawl, honoured unless the caller
+    // opts out (own site, verified). Crawl-delay raises the floor on
+    // the per-worker pause below.
+    const respectRobots = options.respectRobots ?? (process.env.DS_RESPECT_ROBOTS !== '0');
+    let robots = null;
+    if (respectRobots) {
+        robots = await loadRobots(new URL(startUrls[0]).origin, { userAgent: process.env.DS_USER_AGENT });
+        console.log(`🤖 robots.txt: ${robots.status}`
+            + (robots.crawlDelayMs != null ? ` (Crawl-delay ${robots.crawlDelayMs}ms)` : ''));
+    }
+    const robotsAllows = (url) => {
+        if (!robots) return true;
+        try {
+            const u = new URL(url);
+            return robots.allowed(u.pathname + u.search);
+        } catch {
+            return false;
+        }
+    };
+    // Per-worker pause: the caller's rate limit, never below Crawl-delay
+    // shared across the workers (N workers each waiting D·N ≈ 1 req/D).
+    const workerPause = () => Math.max(rateLimit ?? 0,
+        robots?.crawlDelayMs != null ? robots.crawlDelayMs * crawlConcurrency(options) : 0);
 
     /**
      * Bounded link-graph tracking (issue coherence#60): large sites ×
@@ -342,6 +444,7 @@ export async function spiderCrawl(startUrls, options = {}) {
                     queue.push({ url: entry.url, depth: Number(entry.depth) || 0 });
                 }
             }
+            trapGuard.restore([...queued]);
             for (const url of state.broken ?? []) brokenLinks.add(url);
             for (const [url, original] of Object.entries(state.duplicates ?? {})) duplicates.set(url, original);
             for (const [hash, url] of Object.entries(state.hashes ?? {})) contentHashes.set(hash, url);
@@ -390,7 +493,11 @@ export async function spiderCrawl(startUrls, options = {}) {
      * limit the crawler itself enforces — a plan cap that only lives in
      * the calling app is not a cap at all.
      */
-    const maxPages = Number(options.maxPages) > 0 ? Number(options.maxPages) : null;
+    // Even "uncapped" scans stop somewhere: a runaway site (or a trap
+    // the guard missed) must not hold a crawler for half a day.
+    const ceiling = Number(process.env.DS_MAX_PAGES_CEILING) || 5000;
+    const requested = Number(options.maxPages) > 0 ? Number(options.maxPages) : null;
+    const maxPages = Math.min(requested ?? ceiling, ceiling);
     let limitReached = false;
 
     // --- Checkpointing ------------------------------------------------------
@@ -478,6 +585,14 @@ export async function spiderCrawl(startUrls, options = {}) {
                 continue;
             }
 
+            if (!robotsAllows(url)) {
+                robotsBlocked.add(url);
+                visited.add(url);
+                visitedList.push(url);
+                dirty = true;
+                continue;
+            }
+
             visited.add(url);
             console.log(`🔍 Crawling: ${url} (Depth: ${depth})`);
             progress(url);
@@ -490,7 +605,29 @@ export async function spiderCrawl(startUrls, options = {}) {
             for (let attempt = 1; ; attempt++) {
                 inFlight++;
                 try {
-                    result = await scrapePage(null, url, outDir, { ...opts, dedupe: contentHashes, signal });
+                    result = await scrapePage(null, url, outDir, {
+                        ...opts,
+                        dedupe: contentHashes,
+                        signal,
+                        // Same page, different query string: the canonical
+                        // is already in the crawl, so this variant adds
+                        // nothing. Only same-path variants qualify — a site
+                        // that canonicalises everything to its homepage
+                        // must not collapse into one page.
+                        isKnownCanonical: (canonical) => {
+                            try {
+                                const c = normalizeUrl(canonical);
+                                const here = new URL(url);
+                                const target = new URL(c);
+                                return c !== url
+                                    && target.host === here.host
+                                    && target.pathname === here.pathname
+                                    && queued.has(c);
+                            } catch {
+                                return false;
+                            }
+                        },
+                    });
                 } finally {
                     inFlight--;
                 }
@@ -544,12 +681,19 @@ export async function spiderCrawl(startUrls, options = {}) {
                 if (isUncrawlable(link) || queued.has(link)) continue;
 
                 if (new URL(link).hostname === domain && inScope(link) && depth < maxDepth) {
+                    const verdict = trapGuard.admit(link);
+                    if (!verdict.ok) {
+                        queued.add(link); // never re-evaluated
+                        trapSkips[verdict.reason] = (trapSkips[verdict.reason] ?? 0) + 1;
+                        continue;
+                    }
                     queued.add(link);
                     queue.push({ url: link, depth: depth + 1 });
                 }
             }
 
-            if (rateLimit > 0) await waitMs(rateLimit);
+            const pause = workerPause();
+            if (pause > 0) await waitMs(pause);
         }
     }
 
@@ -570,8 +714,10 @@ export async function spiderCrawl(startUrls, options = {}) {
         await checkpoint('abort');
     }
 
+    const trapTotal = Object.values(trapSkips).reduce((a, b) => a + b, 0);
     console.log(`✅ Spider crawl ${aborted ? 'stopped' : 'completed'}. Visited ${visitedList.length} pages, `
-        + `${brokenLinks.size} broken, ${retries} retries.`);
+        + `${brokenLinks.size} broken, ${retries} retries, ${duplicates.size} duplicates, `
+        + `${trapTotal} trap URLs skipped, ${robotsBlocked.size} blocked by robots.txt.`);
 
     const incomingAsObject = Object.fromEntries(
         [...incomingLinks.entries()].map(([link, sources]) => [link, [...sources]]));
@@ -584,6 +730,17 @@ export async function spiderCrawl(startUrls, options = {}) {
     await fs.writeFile(
         path.join(outDir, 'duplicate-pages.json'),
         JSON.stringify(Object.fromEntries(duplicates), null, 2),
+        'utf8',
+    );
+
+    await fs.writeFile(
+        path.join(outDir, 'crawl-skips.json'),
+        JSON.stringify({
+            robots: robots?.status ?? 'ignored',
+            robotsBlocked: [...robotsBlocked].slice(0, 5000),
+            trapReasons: trapSkips,
+            trapShapes: trapGuard.skipped(),
+        }, null, 2),
         'utf8',
     );
 
@@ -611,6 +768,8 @@ export async function spiderCrawl(startUrls, options = {}) {
         visited: visitedList.length,
         saved: visitedList.length - duplicates.size - brokenLinks.size,
         duplicates: duplicates.size,
+        trapSkipped: trapTotal,
+        robotsBlocked: robotsBlocked.size,
         broken: brokenLinks.size,
         retries,
         resumed: Boolean(resumed),
