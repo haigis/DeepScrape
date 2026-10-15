@@ -3,8 +3,7 @@
     "clickSelector": null,
     "shadowSelectors": [
       "#__tealiumGDPRecModal > tealium-consent",
-      "tealium-banner > div > tealium-button-group > tealium-button:nth-child(2)",
-      "button"
+      ".banner__actions .button-group button:nth-of-type(2)"
     ]
   },
   "www.nationwide.co.uk": {

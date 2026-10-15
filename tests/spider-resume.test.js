@@ -46,6 +46,7 @@ beforeEach(async () => {
     outRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ds-spider-'));
     process.env.OUTPUT_DIR = outRoot;
     process.env.DS_RETRY_BASE_MS = '5';
+    process.env.DS_RESPECT_ROBOTS = '0';
     state.fetched = [];
     state.failures = new Map();
     state.onFetch = null;
@@ -54,6 +55,7 @@ beforeEach(async () => {
 afterEach(async () => {
     delete process.env.OUTPUT_DIR;
     delete process.env.DS_RETRY_BASE_MS;
+    delete process.env.DS_RESPECT_ROBOTS;
     delete process.env.DS_PAGE_ATTEMPTS;
     await fs.rm(outRoot, { recursive: true, force: true });
 });
