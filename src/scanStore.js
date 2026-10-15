@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { buildPagePath } from './scraper.js';
 import { classifyLinks, resolveChromeSelectors, resolveChromeGroups } from './chrome.js';
 
@@ -11,8 +12,11 @@ import { classifyLinks, resolveChromeSelectors, resolveChromeGroups } from './ch
 
 const ARTIFACT_NAMES = new Set(['all-links.txt', 'broken-links.txt', 'incoming-links.json', 'duplicate-pages.json']);
 
-/** Folders holding downloaded assets rather than saved pages. */
-const ASSET_FOLDERS = new Set(['images', '_assets']);
+/** Folders holding downloaded assets (or our own caches) rather than saved pages. */
+const ASSET_FOLDERS = new Set(['images', '_assets', '_cache']);
+
+/** Per-scan folder for derived data that is expensive to rebuild. */
+const CACHE_DIR = '_cache';
 
 /** Caps to keep a single page view cheap on very large pages. */
 const MAX_LINKS_ANALYZED = 500;
@@ -145,6 +149,64 @@ const stripTrailingSlash = (url) => url.replace(/\/+$/, '');
 /** Safety caps for the whole-scan inbound index. */
 const MAX_INDEXED_PAGES = Number(process.env.DS_MAX_ANALYZED_PAGES) || 100000;
 
+/**
+ * Inbound indexes held in memory. One index for a 2,000-page scan is
+ * hundreds of MB, and a container that keeps every scan it has ever
+ * served eventually hits its memory limit and restarts — which threw
+ * the cache away and made the next page view wait minutes while it
+ * was rebuilt. So: a few in memory, every one on disk.
+ */
+const MAX_CACHED_SCANS = Number(process.env.DS_INDEX_CACHE_SCANS) || 2;
+
+const indexCachePath = (scanPath, chromeKey) =>
+    path.join(scanPath, CACHE_DIR, `inbound-${createHash('sha1').update(chromeKey).digest('hex').slice(0, 12)}.json`);
+
+/** Loads a persisted index if it was built from exactly this set of pages. */
+async function readPersistedIndex(scanPath, chromeKey, token) {
+    try {
+        const raw = JSON.parse(await fs.readFile(indexCachePath(scanPath, chromeKey), 'utf8'));
+        if (raw?.token !== token) return null;
+        return {
+            index: new Map(raw.index),
+            pageMeta: new Map(raw.pageMeta),
+            targetUrls: new Map(raw.targetUrls),
+            pagesIndexed: raw.pagesIndexed,
+            truncated: raw.truncated,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** Best-effort persist; a failed write only costs the next cold start. */
+async function writePersistedIndex(scanPath, chromeKey, token, value) {
+    const file = indexCachePath(scanPath, chromeKey);
+    try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        const tmp = `${file}.${process.pid}.tmp`;
+        await fs.writeFile(tmp, JSON.stringify({
+            token,
+            pagesIndexed: value.pagesIndexed,
+            truncated: value.truncated,
+            index: [...value.index],
+            pageMeta: [...value.pageMeta],
+            targetUrls: [...value.targetUrls],
+        }));
+        await fs.rename(tmp, file);
+    } catch (err) {
+        console.warn(`⚠️ Could not persist the inbound index for ${scanPath}: ${err.message}`);
+    }
+}
+
+function rememberIndex(scanPath, token, value) {
+    inboundCache.delete(scanPath);
+    inboundCache.set(scanPath, { token, value });
+    while (inboundCache.size > MAX_CACHED_SCANS) {
+        const oldest = inboundCache.keys().next().value;
+        inboundCache.delete(oldest);
+    }
+}
+
 /** scanPath -> { token, index } — rebuilt when files change. */
 const inboundCache = new Map();
 
@@ -218,7 +280,16 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
     const token = `${files.length}:${files.reduce((max, f) => Math.max(max, f.mtimeMs), 0)}:${chromeKey}`;
 
     const cached = inboundCache.get(scanPath);
-    if (cached && cached.token === token) return cached.value;
+    if (cached && cached.token === token) {
+        rememberIndex(scanPath, token, cached.value); // most recently used
+        return cached.value;
+    }
+
+    const persisted = await readPersistedIndex(scanPath, chromeKey, token);
+    if (persisted) {
+        rememberIndex(scanPath, token, persisted);
+        return persisted;
+    }
 
     const considered = files.slice(0, MAX_INDEXED_PAGES);
     const index = new Map();
@@ -309,7 +380,8 @@ export async function getInboundIndex(scanPath, chromeOverrides = null) {
         pagesIndexed: considered.length,
         truncated: files.length > MAX_INDEXED_PAGES,
     };
-    inboundCache.set(scanPath, { token, value });
+    rememberIndex(scanPath, token, value);
+    void writePersistedIndex(scanPath, chromeKey, token, value);
     return value;
 }
 

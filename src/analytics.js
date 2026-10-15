@@ -44,7 +44,7 @@ async function collectPages(scanPath) {
         });
 
         for (const entry of entries) {
-            if (!entry.isDirectory() || entry.name === 'images' || entry.name === '_assets') continue;
+            if (!entry.isDirectory() || entry.name === 'images' || entry.name === '_assets' || entry.name === '_cache') continue;
             await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
         }
     }
